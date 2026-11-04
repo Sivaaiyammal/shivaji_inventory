@@ -6,7 +6,7 @@ export function baleStock(date) {
       SUM(CASE WHEN type='IN' THEN bales ELSE -bales END) bales,
       SUM(CASE WHEN type='IN' THEN weight_kg ELSE -weight_kg END) weight_kg
     FROM bale_moves WHERE date <= ? GROUP BY unit, quality`).all(date);
-  const units = db.prepare('SELECT code FROM units WHERE has_bales=1 ORDER BY sort').all().map(u => u.code);
+  const units = db.prepare('SELECT code FROM units WHERE active=1 ORDER BY sort').all().map(u => u.code);
   return units.map(u => {
     const g = q => rows.find(r => r.unit === u && r.quality === q) || { bales: 0, weight_kg: 0 };
     return { unit: u, q1: g(1), q2: g(2), bales: g(1).bales + g(2).bales, weight_kg: g(1).weight_kg + g(2).weight_kg };
@@ -20,8 +20,8 @@ export function mixing(date) {
 
 // Grid of count x unit; per cell bags + loose cones, loose cones converted to bags like the paper sheet.
 export function singleCone(date) {
-  const units = db.prepare('SELECT code,name FROM units ORDER BY sort').all();
-  const counts = db.prepare('SELECT code FROM counts ORDER BY sort').all().map(c => c.code);
+  const units = db.prepare('SELECT code,name FROM units WHERE active=1 ORDER BY sort').all();
+  const counts = db.prepare('SELECT code FROM counts WHERE active=1 ORDER BY sort').all().map(c => c.code);
   const cells = db.prepare('SELECT * FROM single_cone WHERE date=?').all(date);
   const rows = counts.map(count => {
     const perUnit = {};
