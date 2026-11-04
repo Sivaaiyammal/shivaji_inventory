@@ -129,3 +129,11 @@ td:has(input) { white-space:nowrap; }
 .grid td.mk { background:var(--card); }
 .grid tbody tr:nth-child(even) td.mk { background:#fafbfc; }
 .grid tbody tr:hover td.mk { background:#eef6f4; }
+
+/* places table inside the calculator popup */
+.places { width:100%; }
+.places th, .places td { padding:6px 10px; }
+.places td:first-child, .places th:first-child { text-align:left; }
+.places input { width:100%; text-align:right; font-size:16px; padding:6px 8px; }
+.places tfoot td { font-weight:700; background:var(--bg); }
+.calc-pop { max-height:90vh; overflow:auto; }

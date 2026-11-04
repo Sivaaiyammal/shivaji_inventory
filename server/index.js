@@ -17,6 +17,7 @@ app.get('/api/masters', (_, res) => res.json({
   counts: db.prepare('SELECT code FROM counts WHERE active=1 ORDER BY sort').all().map(c => c.code),
   parties: db.prepare('SELECT name FROM parties WHERE active=1 ORDER BY name').all().map(p => p.name),
   brands: db.prepare('SELECT name FROM brands WHERE active=1 ORDER BY name').all().map(b => b.name),
+  places: db.prepare('SELECT name, grp "group" FROM places WHERE active=1 ORDER BY name').all(),
   ranges: db.prepare('SELECT name FROM ranges WHERE active=1 ORDER BY name').all().map(r => r.name),
 }));
 // Everything incl. inactive, with an 'used' flag (saved entries exist) for the Master tab
@@ -29,6 +30,7 @@ app.get('/api/masters/all', (_, res) => res.json({
     FROM counts ORDER BY sort`).all(),
   parties: db.prepare(`SELECT name, active, EXISTS(SELECT 1 FROM winding w WHERE w.party=parties.name) used FROM parties ORDER BY name`).all(),
   brands: db.prepare(`SELECT name, active, 0 used FROM brands ORDER BY name`).all(),
+  places: db.prepare(`SELECT name, grp "group", active, 0 used FROM places ORDER BY name`).all(),
   ranges: db.prepare(`SELECT name, active, 0 used FROM ranges ORDER BY name`).all(),
 }));
 app.post('/api/parties', (req, res) => {
@@ -39,12 +41,13 @@ app.post('/api/parties', (req, res) => {
 });
 
 // Rename / activate / deactivate master items (Master tab)
-const TABLES = { units: ['units', 'code'], counts: ['counts', 'code'], parties: ['parties', 'name'], brands: ['brands', 'name'], ranges: ['ranges', 'name'] };
+const TABLES = { units: ['units', 'code'], counts: ['counts', 'code'], parties: ['parties', 'name'], brands: ['brands', 'name'], ranges: ['ranges', 'name'], places: ['places', 'name'] };
 app.patch('/api/masters/:kind/:key', (req, res) => {
   const [table, keyCol] = TABLES[req.params.kind] || [];
   if (!table) return res.status(404).json({ error: 'Unknown master' });
   const key = req.params.key;
-  const { active, name } = req.body;
+  const { active, name, group } = req.body;
+  if (group !== undefined && table === 'places') db.prepare('UPDATE places SET grp=? WHERE name=?').run(group, key);
   if (active !== undefined) db.prepare(`UPDATE ${table} SET active=? WHERE ${keyCol}=?`).run(active ? 1 : 0, key);
   if (name !== undefined) {
     const v = name.trim();
@@ -56,7 +59,7 @@ app.patch('/api/masters/:kind/:key', (req, res) => {
       db.exec('BEGIN');
       try {
         db.prepare(`UPDATE ${table} SET ${keyCol}=? WHERE ${keyCol}=?`).run(v, key);
-        if (table === 'counts') { db.prepare('UPDATE single_cone SET count=? WHERE count=?').run(v, key); db.prepare('UPDATE winding SET count=? WHERE count=?').run(v, key); }
+        if (table === 'counts') { db.prepare('UPDATE single_cone SET count=? WHERE count=?').run(v, key); db.prepare('UPDATE single_cone_places SET count=? WHERE count=?').run(v, key); db.prepare('UPDATE winding SET count=? WHERE count=?').run(v, key); }
         else db.prepare('UPDATE winding SET party=? WHERE party=?').run(v, key);
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); return res.status(500).json({ error: e.message }); }
@@ -106,6 +109,18 @@ app.post('/api/brands', (req, res) => {
   db.prepare('INSERT OR IGNORE INTO brands (name) VALUES (?)').run(name);
   res.json({ ok: true });
 });
+app.post('/api/places', (req, res) => {
+  const name = (req.body.name || '').trim(), group = (req.body.group || '').trim();
+  if (!name) return res.status(400).json({ error: 'Place name required' });
+  if (!db.prepare('SELECT 1 FROM units WHERE code=?').get(group)) return res.status(400).json({ error: 'Choose a group (unit)' });
+  if (db.prepare('SELECT 1 FROM places WHERE name=?').get(name)) return res.status(409).json({ error: name + ' already exists' });
+  db.prepare('INSERT INTO places (name,grp) VALUES (?,?)').run(name, group);
+  res.json({ ok: true });
+});
+app.delete('/api/places/:name', (req, res) => {
+  db.prepare('DELETE FROM places WHERE name=?').run(req.params.name);
+  res.json({ ok: true });
+});
 app.post('/api/ranges', (req, res) => {
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Count range required' });
@@ -130,16 +145,47 @@ app.delete('/api/parties/:name', (req, res) => {
 // Bale ledger (receipts + mixing issues)
 app.get('/api/bales', (req, res) => res.json(
   db.prepare('SELECT * FROM bale_moves WHERE date=? ORDER BY id DESC').all(D(req.query))));
-// Running bale stock up to a date: received, issued and balance per unit and quality
+// Opening balances (Master tab)
+app.get('/api/opening', (_, res) => res.json(db.prepare('SELECT * FROM opening_balances ORDER BY date DESC, id DESC').all()));
+const openingOk = b => /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') && [1, 2].includes(+b.quality) && Number.isInteger(+b.bales) && +b.bales >= 0
+  && db.prepare('SELECT 1 FROM units WHERE code=?').get(b.unit);
+app.post('/api/opening', (req, res) => {
+  const b = req.body;
+  if (!openingOk(b)) return res.status(400).json({ error: 'Unit, date, quality (1/2) and bales (0 or more, whole number) required' });
+  db.prepare('INSERT INTO opening_balances (date,unit,quality,bales) VALUES (?,?,?,?)').run(b.date, b.unit, +b.quality, +b.bales);
+  res.json({ ok: true });
+});
+app.put('/api/opening/:id', (req, res) => {
+  const b = req.body;
+  if (!openingOk(b)) return res.status(400).json({ error: 'Unit, date, quality (1/2) and bales (0 or more, whole number) required' });
+  db.prepare('UPDATE opening_balances SET date=?, unit=?, quality=?, bales=? WHERE id=?').run(b.date, b.unit, +b.quality, +b.bales, req.params.id);
+  res.json({ ok: true });
+});
+app.delete('/api/opening/:id', (req, res) => {
+  db.prepare('DELETE FROM opening_balances WHERE id=?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// Daily bale stock per unit and quality. Opening is carried forward: it is the opening balance set in Master
+// plus everything received and issued BEFORE the selected date, i.e. the previous day's closing stock.
+// Received and issued are that day's entries; closing stock = opening + received - issued.
 app.get('/api/bale-stock', (req, res) => {
   const date = D(req.query);
-  const rows = db.prepare(`SELECT unit, quality,
+  const before = db.prepare(`SELECT unit, quality, SUM(CASE WHEN type='IN' THEN bales ELSE -bales END) net
+    FROM bale_moves WHERE date < ? GROUP BY unit, quality`).all(date);
+  const day = db.prepare(`SELECT unit, quality,
       SUM(CASE WHEN type='IN' THEN bales ELSE 0 END) rec, SUM(CASE WHEN type='MIX' THEN bales ELSE 0 END) iss
-    FROM bale_moves WHERE date <= ? GROUP BY unit, quality`).all(date);
+    FROM bale_moves WHERE date = ? GROUP BY unit, quality`).all(date);
+  const opening = db.prepare('SELECT unit, quality, SUM(bales) bales FROM opening_balances WHERE date <= ? GROUP BY unit, quality').all(date);
   const units = db.prepare('SELECT code, name FROM units WHERE active=1 ORDER BY sort').all();
+  const pick = (list, u, q, k) => list.find(r => r.unit === u && r.quality === q)?.[k] || 0;
   res.json(units.map(u => {
-    const g = q => rows.find(r => r.unit === u.code && r.quality === q) || { rec: 0, iss: 0 };
-    return { unit: u.code, name: u.name, q1: { rec: g(1).rec, iss: g(1).iss }, q2: { rec: g(2).rec, iss: g(2).iss } };
+    const f = q => ({
+      open: pick(opening, u.code, q, 'bales') + pick(before, u.code, q, 'net'),
+      rec: pick(day, u.code, q, 'rec'),
+      iss: pick(day, u.code, q, 'iss'),
+    });
+    return { unit: u.code, name: u.name, q1: f(1), q2: f(2) };
   }));
 });
 app.post('/api/bales', (req, res) => {
@@ -168,15 +214,27 @@ app.put('/api/single-cone', (req, res) => {
   const up = db.prepare(`INSERT INTO single_cone (date,unit,count,bags,loose_cones,bags_expr,cones_expr) VALUES (?,?,?,?,?,?,?)
     ON CONFLICT(date,unit,count) DO UPDATE SET bags=excluded.bags, loose_cones=excluded.loose_cones,
       bags_expr=excluded.bags_expr, cones_expr=excluded.cones_expr`);
+  const delPlaces = db.prepare('DELETE FROM single_cone_places WHERE date=? AND unit=? AND count=?');
+  const addPlace = db.prepare('INSERT INTO single_cone_places (date,unit,count,place,bags,cones) VALUES (?,?,?,?,?,?)');
   db.exec('BEGIN');
   try {
-    cells.forEach(c => up.run(date, c.unit, c.count, +c.bags || 0, +c.loose_cones || 0, c.bags_expr || '', c.cones_expr || ''));
+    cells.forEach(c => {
+      up.run(date, c.unit, c.count, +c.bags || 0, +c.loose_cones || 0, c.bags_expr || '', c.cones_expr || '');
+      // c.places = { placeName: { bags, cones } }; replaces what was saved for this cell
+      if (c.places) {
+        delPlaces.run(date, c.unit, c.count);
+        Object.entries(c.places).forEach(([place, v]) => {
+          if ((+v.bags || 0) || (+v.cones || 0)) addPlace.run(date, c.unit, c.count, place, +v.bags || 0, +v.cones || 0);
+        });
+      }
+    });
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); return res.status(500).json({ error: e.message }); }
   res.json({ ok: true });
 });
 app.get('/api/single-cone', (req, res) => res.json({
-  cells: db.prepare('SELECT * FROM single_cone WHERE date=?').all(D(req.query)) }));
+  cells: db.prepare('SELECT * FROM single_cone WHERE date=?').all(D(req.query)),
+  places: db.prepare('SELECT unit, count, place, bags, cones FROM single_cone_places WHERE date=?').all(D(req.query)) }));
 
 // Chippam / cone bags grid: cells = [{brand,count,qty}]
 const KINDS = ['chippam', 'conebags'];
@@ -187,7 +245,9 @@ app.get('/api/brand-stock/:kind', (req, res) => {
     rows: db.prepare('SELECT label FROM sheet_rows WHERE kind=? ORDER BY sort').all(k).map(r => r.label),
     actuals: Object.fromEntries(db.prepare('SELECT label, actual FROM sheet_rows WHERE kind=?').all(k).map(r => [r.label, r.actual || ''])),
     cols: db.prepare('SELECT brand FROM sheet_cols WHERE kind=? ORDER BY sort').all(k).map(c => c.brand),
+    units: Object.fromEntries(db.prepare('SELECT label, unit FROM sheet_rows WHERE kind=?').all(k).map(r => [r.label, r.unit || ''])),
     cells: db.prepare('SELECT brand, count, qty FROM brand_stock WHERE kind=? AND date=?').all(k, D(req.query)),
+    places: db.prepare('SELECT brand, count, place, qty FROM brand_stock_places WHERE kind=? AND date=?').all(k, D(req.query)),
   });
 });
 // layout of a sheet: add / remove a row (count range) or a brand column
@@ -213,6 +273,7 @@ app.patch('/api/brand-stock/:kind/rows/:label', (req, res) => {
   try {
     db.prepare('UPDATE sheet_rows SET label=? WHERE kind=? AND label=?').run(label, k, old);
     db.prepare('UPDATE brand_stock SET count=? WHERE kind=? AND count=?').run(label, k, old);
+    db.prepare('UPDATE brand_stock_places SET count=? WHERE kind=? AND count=?').run(label, k, old);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); return res.status(500).json({ error: e.message }); }
   res.json({ ok: true });
@@ -236,12 +297,22 @@ app.delete('/api/brand-stock/:kind/cols/:brand', (req, res) => {
 });
 app.put('/api/brand-stock/:kind', (req, res) => {
   if (!KINDS.includes(req.params.kind)) return res.status(404).json({ error: 'Unknown sheet' });
-  const { date, cells, actuals } = req.body;
+  const { date, cells, actuals, units } = req.body;
   const up = db.prepare(`INSERT INTO brand_stock VALUES (?,?,?,?,?)
     ON CONFLICT(kind,date,brand,count) DO UPDATE SET qty=excluded.qty`);
   db.exec('BEGIN');
   try {
-    cells.forEach(c => up.run(req.params.kind, date, c.brand, c.count, +c.qty || 0));
+    const delPl = db.prepare('DELETE FROM brand_stock_places WHERE kind=? AND date=? AND brand=? AND count=?');
+    const addPl = db.prepare('INSERT INTO brand_stock_places (kind,date,brand,count,place,qty) VALUES (?,?,?,?,?,?)');
+    cells.forEach(c => {
+      up.run(req.params.kind, date, c.brand, c.count, +c.qty || 0);
+      // c.places = { placeName: qty }; replaces what was saved for this cell
+      if (c.places) {
+        delPl.run(req.params.kind, date, c.brand, c.count);
+        Object.entries(c.places).forEach(([place, q]) => { if (+q) addPl.run(req.params.kind, date, c.brand, c.count, place, +q); });
+      }
+    });
+    Object.entries(units || {}).forEach(([label, u]) => db.prepare('UPDATE sheet_rows SET unit=? WHERE kind=? AND label=?').run(String(u), req.params.kind, label));
     Object.entries(actuals || {}).forEach(([label, v]) => db.prepare('UPDATE sheet_rows SET actual=? WHERE kind=? AND label=?').run(String(v).trim(), req.params.kind, label));
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); return res.status(500).json({ error: e.message }); }

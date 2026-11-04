@@ -50,9 +50,25 @@ function Login({ onLogin }) {
   );
 }
 
+// The current tab lives in the URL (#/single, #/master/places) and the date in sessionStorage, so a refresh stays where you were
+const TAB_KEYS = ['bales', 'single', 'winding', 'chippam', 'conebags', 'report', 'master'];
+const hashParts = () => location.hash.replace(/^#\/?/, '').split('/');
+const tabFromHash = () => (TAB_KEYS.includes(hashParts()[0]) ? hashParts()[0] : 'bales');
+const store = {
+  get: k => { try { return sessionStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { sessionStorage.setItem(k, v); } catch { /* storage blocked: fine */ } },
+};
+
 function Shell({ user, onLogout }) {
-  const [tab, setTab] = useState('bales');
-  const [date, setDate] = useState(iso());
+  const [tab, setTabState] = useState(tabFromHash);
+  const [date, setDateState] = useState(() => store.get('date') || iso());
+  const setDate = d => { setDateState(d); store.set('date', d); };
+  const setTab = k => { location.hash = '/' + k; };
+  useEffect(() => {
+    const onHash = () => setTabState(tabFromHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
   const [masters, setMasters] = useState(null);
   useEffect(() => { api('/api/masters').then(setMasters); }, []);
   const tabs = [['bales', 'Bale Stock'], ['single', 'Single Cone'], ['winding', 'Cone Winding'], ['chippam', 'Chippam'], ['conebags', 'Cone Bags'], ['report', 'Report / Print'], ['master', 'Master']];
@@ -127,36 +143,38 @@ function Bales({ date, masters }) {
       </div>
 
       <div className="card">
-        <h2>Stock as on {date} <span className="mute">(received − issued)</span></h2>
+        <h2>Stock as on {date} <span className="mute">(opening = previous day stock)</span></h2>
         <BaleStockTable rows={stock} />
       </div>
     </>
   );
 }
 
-// Stock = received - issued, running total up to the selected date (read-only)
+// Stock = opening + received - issued, running total up to the selected date (read-only)
 function BaleStockTable({ rows }) {
   const sum = f => rows.reduce((s, r) => s + f(r), 0);
   const cols = [
     ['1st quality', r => r.q1], ['2nd quality', r => r.q2],
-    ['Total', r => ({ rec: r.q1.rec + r.q2.rec, iss: r.q1.iss + r.q2.iss })],
+    ['Total', r => ({ open: r.q1.open + r.q2.open, rec: r.q1.rec + r.q2.rec, iss: r.q1.iss + r.q2.iss })],
+  ];
+  const heads = ['Opening', 'Received', 'Issued', 'Stock'];
+  // stock = opening + received - issued
+  const cells = (t, v, tag) => [
+    <td key={t + 'o'}>{v.open}</td>, <td key={t + 'r'}>{v.rec}</td>, <td key={t + 'i'}>{v.iss}</td>,
+    <td key={t + 's'} className="stk">{tag === 'b' ? <b>{v.open + v.rec - v.iss}</b> : v.open + v.rec - v.iss}</td>,
   ];
   return (
     <table className="stock">
       <thead>
-        <tr><th rowSpan="2">Unit</th>{cols.map(([t]) => <th key={t} colSpan="3" className="grp">{t}</th>)}</tr>
-        <tr>{cols.map(([t]) => ['Received', 'Issued', 'Stock'].map(h => <th key={t + h} className={h === 'Stock' ? 'stk' : ''}>{h}</th>))}</tr>
+        <tr><th rowSpan="2">Unit</th>{cols.map(([t]) => <th key={t} colSpan="4" className="grp">{t}</th>)}</tr>
+        <tr>{cols.map(([t]) => heads.map(h => <th key={t + h} className={h === 'Stock' ? 'stk' : ''}>{h}</th>))}</tr>
       </thead>
       <tbody>
-        {rows.map(r => (
-          <tr key={r.unit}><td>{r.name}</td>
-            {cols.map(([t, get]) => { const v = get(r); return [<td key={t + 'r'}>{v.rec}</td>, <td key={t + 'i'}>{v.iss}</td>, <td key={t + 's'} className="stk"><b>{v.rec - v.iss}</b></td>]; })}
-          </tr>
-        ))}
-        {!rows.length && <tr><td colSpan="10" className="mute">No units</td></tr>}
+        {rows.map(r => <tr key={r.unit}><td>{r.name}</td>{cols.map(([t, get]) => cells(t, get(r), 'b'))}</tr>)}
+        {!rows.length && <tr><td colSpan="13" className="mute">No units</td></tr>}
       </tbody>
       <tfoot><tr><td>TOTAL</td>
-        {cols.map(([t, get]) => [<td key={t + 'r'}>{sum(r => get(r).rec)}</td>, <td key={t + 'i'}>{sum(r => get(r).iss)}</td>, <td key={t + 's'} className="stk">{sum(r => get(r).rec - get(r).iss)}</td>])}
+        {cols.map(([t, get]) => cells(t, { open: sum(r => get(r).open), rec: sum(r => get(r).rec), iss: sum(r => get(r).iss) }))}
       </tr></tfoot>
     </table>
   );
@@ -206,43 +224,48 @@ function BaleTable({ stock, adjust }) {
   );
 }
 
-// Evaluate a simple sum like "10+20+30-20"; only digits and + - * / ( ) . are accepted
-const calc = text => {
-  const t = text.trim();
-  if (!t || !/^[0-9+\-*/().\s]+$/.test(t)) return null;
-  try {
-    const v = Function(`"use strict"; return (${t})`)();
-    return Number.isFinite(v) ? Math.round(v) : null;
-  } catch { return null; }
-};
-
-// Calculator icon beside an input: type a sum, press Enter to put the result in the input.
-// The sum is kept (expr) and shown on hover and when the popup is reopened.
-function CalcButton({ expr, value, title, onApply }) {
+// Calculator icon on a cell: opens a table of the places in the row's unit with one input per field
+// (Single Cone: Bags + Cones, Chippam / Cone Bags: one Qty for the brand).
+// "Add to cell" gives back the totals and keeps the per-place figures.
+// value / draft: { placeName: { fieldKey: number } }
+function PlacesCalc({ title, places, value, fields = [['bags', 'Bags'], ['cones', 'Cones']], onApply }) {
   const [open, setOpen] = useState(false);
-  const [text, setText] = useState('');
-  const show = () => { setText(expr || ''); setOpen(true); };
-  const result = calc(text);
+  const [draft, setDraft] = useState({});
+  const any = v => fields.some(([k]) => num(v?.[k]));
+  const entered = Object.entries(value || {}).filter(([, v]) => any(v));
+  const show = () => { setDraft(JSON.parse(JSON.stringify(value || {}))); setOpen(true); };
+  const set = (p, k, v) => setDraft({ ...draft, [p]: { ...draft[p], [k]: v } });
+  const sum = k => places.reduce((s, p) => s + num(draft[p]?.[k]), 0);
   const apply = () => {
-    if (result === null) return;
-    onApply(result, text.trim());
+    const out = {}, totals = {};
+    places.forEach(p => { if (any(draft[p])) out[p] = Object.fromEntries(fields.map(([k]) => [k, num(draft[p][k])])); });
+    fields.forEach(([k]) => { totals[k] = sum(k); });
+    onApply(totals, out);
     setOpen(false);
   };
   return (
     <>
-      <button type="button" className={'calc-btn' + (expr ? ' has' : '')} onClick={show} title={expr ? `${expr} = ${value}` : 'Calculator'}>🖩</button>
+      <button type="button" className={'calc-btn' + (entered.length ? ' has' : '')} onClick={show}
+        title={entered.length ? entered.map(([p, v]) => `${p}: ${fields.map(([k, l]) => `${num(v[k])} ${l.toLowerCase()}`).join(', ')}`).join('\n') : 'Enter figures by place'}>🖩</button>
       {open && createPortal(
         <div className="calc-back" onClick={() => setOpen(false)}>
           <div className="calc-pop" onClick={e => e.stopPropagation()}>
-            <div className="calc-head"><b>Calculator</b><span className="mute">{title}</span></div>
-            <textarea autoFocus rows={3} value={text} placeholder="10+20+30-20" onChange={e => setText(e.target.value.replace(/\n/g, ' '))}
-              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); apply(); } else if (e.key === 'Escape') setOpen(false); }} />
-            <div className={'calc-res' + (text.trim() && result === null ? ' bad' : '')}>
-              {text.trim() ? (result === null ? 'Enter a valid sum, e.g. 10+20-5' : `= ${result}`) : 'Type a sum like 10+20+30-20, then press Enter'}
-            </div>
+            <div className="calc-head"><b>Places</b><span className="mute">{title}</span></div>
+            {places.length ? (
+              <table className="places">
+                <thead><tr><th>Places</th>{fields.map(([k, l]) => <th key={k}>{l}</th>)}</tr></thead>
+                <tbody>
+                  {places.map(p => (
+                    <tr key={p}><td>{p}</td>
+                      {fields.map(([k]) => <td key={k}><input type="number" min="0" value={draft[p]?.[k] ?? ''} onChange={e => set(p, k, e.target.value)} /></td>)}</tr>
+                  ))}
+                </tbody>
+                <tfoot><tr><td>TOTAL</td>{fields.map(([k]) => <td key={k}>{sum(k)}</td>)}</tr></tfoot>
+              </table>
+            ) : <p className="mute">No places for this unit. Add places in Master → Places (rows on Chippam / Cone Bags also need a Unit chosen).</p>}
             <div className="calc-acts">
               <button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button>
-              <button type="button" className="btn primary" disabled={result === null} onClick={apply}>Add to input</button>
+              <button type="button" className="btn primary" disabled={!places.length} onClick={apply}>Add to cell</button>
             </div>
           </div>
         </div>,
@@ -288,16 +311,21 @@ function Single({ date, masters, setMasters }) {
   );
   const key = (u, c) => `${u}|${c}`;
   useEffect(() => {
-    api(`/api/single-cone?date=${date}`).then(({ cells }) => {
+    api(`/api/single-cone?date=${date}`).then(({ cells, places }) => {
       const m = {};
-      cells.forEach(c => { m[key(c.unit, c.count)] = { bags: c.bags || '', loose_cones: c.loose_cones || '', bags_expr: c.bags_expr || '', cones_expr: c.cones_expr || '' }; });
+      cells.forEach(c => { m[key(c.unit, c.count)] = { bags: c.bags || '', loose_cones: c.loose_cones || '', places: {} }; });
+      places.forEach(p => {
+        const k = key(p.unit, p.count);
+        m[k] = { bags: '', loose_cones: '', ...m[k], places: { ...m[k]?.places, [p.place]: { bags: p.bags || '', cones: p.cones || '' } } };
+      });
       setCells(m); setMsg('');
     });
   }, [date]);
-  // typing straight into an input drops the sum that was saved for it (exprField)
-  const upd = (u, c, field, v, exprField) => setCells({ ...cells, [key(u, c)]: { ...cells[key(u, c)], [field]: v, ...(exprField && { [exprField]: '' }) } });
-  // calculator result: set the input and remember the sum
-  const setCalc = (u, c, field, v, exprField, text) => setCells({ ...cells, [key(u, c)]: { ...cells[key(u, c)], [field]: String(v), [exprField]: text } });
+  // typing straight into an input drops the per-place figures, since they would no longer add up to it
+  const upd = (u, c, field, v) => setCells({ ...cells, [key(u, c)]: { ...cells[key(u, c)], [field]: v, places: {} } });
+  // places calculator: totals go into the cell, per-place figures are kept
+  const setPlaces = (u, c, bags, cones, places) => setCells({ ...cells, [key(u, c)]: { ...cells[key(u, c)], bags: bags || '', loose_cones: cones || '', places } });
+  const placesOf = unit => (masters.places || []).filter(p => p.group === unit).map(p => p.name);
   const per = 40;
   // sum a set of cells: bags and loose cones are totalled separately; `all` = bags + loose cones converted at 40 per bag
   const sumCells = pairs => {
@@ -312,9 +340,9 @@ function Single({ date, masters, setMasters }) {
     const list = [];
     masters.units.forEach(u => masters.counts.forEach(c => {
       const x = cells[key(u.code, c)];
-      if (x) list.push({ unit: u.code, count: c, bags: num(x.bags), loose_cones: num(x.loose_cones), bags_expr: x.bags_expr || '', cones_expr: x.cones_expr || '' });
+      if (x) list.push({ unit: u.code, count: c, bags: num(x.bags), loose_cones: num(x.loose_cones), places: x.places || {} });
     }));
-    await api('/api/single-cone', { method: 'PUT', body: { date, cells: list, ...(withActual && { actuals }) } });
+    await api('/api/single-cone', { method: 'PUT', body: { date, cells: list, ...(withActual && { actuals, units }) } });
     setMsg('Saved');
   };
   return (
@@ -334,10 +362,9 @@ function Single({ date, masters, setMasters }) {
             <tr key={c}><td>{c} <button className="x" title="Remove row" onClick={() => removeItem('counts', c, c)}>✕</button></td>
               {masters.units.map(u => (
                 <td key={u.code}>
-                  <input type="number" min="0" placeholder="bags" value={cells[key(u.code, c)]?.bags ?? ''} onChange={e => upd(u.code, c, 'bags', e.target.value, 'bags_expr')} style={{ width: 62 }} />
-                  <CalcButton title={u.name + " · " + c + " · bags"} expr={cells[key(u.code, c)]?.bags_expr} value={cells[key(u.code, c)]?.bags} onApply={(v, t) => setCalc(u.code, c, 'bags', v, 'bags_expr', t)} />{' '}
-                  <input type="number" min="0" placeholder="cones" value={cells[key(u.code, c)]?.loose_cones ?? ''} onChange={e => upd(u.code, c, 'loose_cones', e.target.value, 'cones_expr')} style={{ width: 62 }} />
-                  <CalcButton title={u.name + " · " + c + " · loose cones"} expr={cells[key(u.code, c)]?.cones_expr} value={cells[key(u.code, c)]?.loose_cones} onApply={(v, t) => setCalc(u.code, c, 'loose_cones', v, 'cones_expr', t)} />
+                  <input type="number" min="0" placeholder="bags" value={cells[key(u.code, c)]?.bags ?? ''} onChange={e => upd(u.code, c, 'bags', e.target.value)} style={{ width: 62 }} />{' '}
+                  <input type="number" min="0" placeholder="cones" value={cells[key(u.code, c)]?.loose_cones ?? ''} onChange={e => upd(u.code, c, 'loose_cones', e.target.value)} style={{ width: 62 }} />
+                  <PlacesCalc title={u.name + ' · ' + c} places={placesOf(u.code)} value={cells[key(u.code, c)]?.places} onApply={(t, p) => setPlaces(u.code, c, t.bags, t.cones, p)} />
                 </td>
               ))}
               <td className="tot">{(() => { const t = sumCells(masters.units.map(u => [u.code, c])); return <><Pair t={t} /><div className="eq">= <Overall t={t} /></div></>; })()}</td></tr>
@@ -359,9 +386,10 @@ function Single({ date, masters, setMasters }) {
 }
 
 function Master({ setMasters }) {
-  const [sec, setSec] = useState('units');
-  const [all, setAll] = useState({ units: [], counts: [], parties: [], brands: [], ranges: [] });
-  const [f, setF] = useState({ code: '', name: '' });
+  const [sec, setSecState] = useState(() => hashParts()[1] || 'units');
+  const setSec = k => { setSecState(k); location.hash = '/master/' + k; };
+  const [all, setAll] = useState({ units: [], places: [], counts: [], parties: [], brands: [], ranges: [] });
+  const [f, setF] = useState({ code: '', name: '', group: '' });
   const [err, setErr] = useState('');
   const enc = encodeURIComponent;
   const load = useCallback(() => api('/api/masters/all').then(setAll), []);
@@ -374,20 +402,25 @@ function Master({ setMasters }) {
   };
   const SECTIONS = {
     units: { title: 'Units', hint: 'Each unit is a column in Single Cone and a row in Bale Stock.', list: all.units, id: u => u.code, label: () => '', show: u => u.name },
+    places: { title: 'Places', hint: 'Places, each in a group. The group is one of your units.', list: all.places, id: p => p.name, label: () => '' },
     counts: { title: 'Counts', hint: 'Each count is a row in Single Cone and an option in Cone Winding.', list: all.counts, id: c => c.code, label: () => '' },
     parties: { title: 'Companies / parties', hint: 'Parties used in Cone Winding.', list: all.parties, id: p => p.name, label: () => '' },
     brands: { title: 'Brands', hint: 'Brand names, used as columns in Chippam and Cone Bags.', list: all.brands, id: b => b.name, label: () => '' },
+    opening: { title: 'Opening balances', list: [], id: () => '', label: () => '' },
     ranges: { title: 'Count ranges', hint: 'Count ranges such as 3/56 - 3/62, used as rows in Chippam and Cone Bags.', list: all.ranges, id: r => r.name, label: () => '' },
   };
-  const S = SECTIONS[sec];
+  const S = SECTIONS[sec] || SECTIONS.units;
   const shown = it => (S.show ? S.show(it) : S.id(it));
-  const switchSec = k => { setSec(k); setF({ code: '', name: '' }); setErr(''); };
+  const groups = all.units.filter(u => u.active); // group dropdown options
+  const unitName = code => all.units.find(u => u.code === code)?.name || code;
+  const switchSec = k => { setSec(k); setF({ code: '', name: '', group: '' }); setErr(''); };
   const add = async e => {
     e.preventDefault();
     const [url, body] = sec === 'units' ? ['/api/units', { code: f.code, name: f.name }]
+      : sec === 'places' ? ['/api/places', { name: f.name, group: f.group || groups[0]?.code }]
       : sec === 'counts' ? ['/api/counts', { code: f.name }]
       : sec === 'ranges' ? ['/api/ranges', { name: f.name.trim() }] : [`/api/${sec}`, { name: f.name }];
-    if (await run(url, 'POST', body)) setF({ code: '', name: '' });
+    if (await run(url, 'POST', body)) setF({ code: '', name: '', group: f.group });
   };
   const rename = it => {
     const v = (window.prompt('Rename', sec === 'units' ? it.name : S.id(it)) || '').trim();
@@ -400,6 +433,7 @@ function Master({ setMasters }) {
       <div className="subtabs">
         {Object.entries(SECTIONS).map(([k, v]) => <button key={k} className={sec === k ? 'on' : ''} onClick={() => switchSec(k)}>{v.title}</button>)}
       </div>
+      {sec === 'opening' ? <OpeningBalances units={groups} /> : <>
       <h2 className="page-title">{S.title}</h2>
       <p className="mute">{S.hint} Deactivate anything no longer in use; only unused items can be deleted.</p>
       {err && <div className="err">{err}</div>}
@@ -409,17 +443,27 @@ function Master({ setMasters }) {
             <>
               <label>To count<input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="e.g. 3/62" style={{ width: 110 }} required /></label>
             </>
+          ) : sec === 'places' ? (
+            <>
+              <label>Place name<input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="Place" required /></label>
+              <label>Group<select value={f.group || groups[0]?.code || ''} onChange={e => setF({ ...f, group: e.target.value })} required>
+                {groups.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></label>
+            </>
           ) : (
             <label>{'New ' + { units: 'unit', counts: 'count', parties: 'party', brands: 'brand' }[sec]}
               <input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder={sec === 'units' ? 'e.g. X Unit' : sec === 'counts' ? 'e.g. 30S' : 'Name'} required /></label>
           )}
-          <button className="btn primary">Add {{ units: 'unit', counts: 'count', parties: 'party', brands: 'brand', ranges: 'range' }[sec]}</button>
+          <button className="btn primary">Add {{ units: 'unit', places: 'place', counts: 'count', parties: 'party', brands: 'brand', ranges: 'range' }[sec]}</button>
         </form>
       </div>
       <div className="card list">
         {S.list.map(it => (
           <div key={S.id(it)} className={'row' + (it.active ? '' : ' off')}>
-            <span className="name"><b>{shown(it)}</b> <span className="mute">{S.label(it)}</span></span>
+            <span className="name"><b>{shown(it)}</b> <span className="mute">{S.label(it)}</span>
+              {sec === 'places' && <span className="mute"> · Group: <select value={it.group} onChange={e => run(`/api/masters/places/${enc(it.name)}`, 'PATCH', { group: e.target.value })}>
+                {groups.some(u => u.code === it.group) || <option value={it.group}>{unitName(it.group)}</option>}
+                {groups.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></span>}
+            </span>
             <span className={'badge' + (it.active ? '' : ' off')}>{it.active ? 'Active' : 'Inactive'}</span>
             <span className="acts">
               <button className="btn sm" onClick={() => rename(it)}>Rename</button>
@@ -429,6 +473,64 @@ function Master({ setMasters }) {
           </div>
         ))}
         {!S.list.length && <div className="mute">Nothing here yet</div>}
+      </div>
+      </>}
+    </>
+  );
+}
+
+// Master > Opening balances: opening bale stock per unit, date and quality; counted in the Bale Stock table
+function OpeningBalances({ units }) {
+  const blank = { unit: '', date: iso(), quality: 1, bales: '' };
+  const [f, setF] = useState(blank);
+  const [rows, setRows] = useState([]);
+  const [err, setErr] = useState('');
+  const load = useCallback(() => api('/api/opening').then(setRows), []);
+  useEffect(() => { load(); }, [load]);
+  const unitName = code => units.find(u => u.code === code)?.name || code;
+  const call = async (url, method, body) => {
+    setErr('');
+    try { await api(url, { method, body }); await load(); return true; } catch (x) { setErr(x.message); return false; }
+  };
+  const add = async e => {
+    e.preventDefault();
+    if (await call('/api/opening', 'POST', { ...f, unit: f.unit || units[0]?.code })) setF({ ...f, bales: '' });
+  };
+  const edit = (o, patch) => call(`/api/opening/${o.id}`, 'PUT', { ...o, ...patch });
+  const del = o => window.confirm(`Delete this opening balance (${unitName(o.unit)}, ${o.date})?`) && call(`/api/opening/${o.id}`, 'DELETE');
+  const quality = <><option value={1}>1st</option><option value={2}>2nd</option></>;
+  return (
+    <>
+      <h2 className="page-title">Opening balances</h2>
+      <p className="mute">Bales already in stock before you started entering Received and Issued. Each one counts in the Bale Stock table from its date onwards.</p>
+      {err && <div className="err">{err}</div>}
+      <div className="card">
+        <form className="form" onSubmit={add}>
+          <label>Unit<select value={f.unit || units[0]?.code || ''} onChange={e => setF({ ...f, unit: e.target.value })} required>
+            {units.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></label>
+          <label>Date<input type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} required /></label>
+          <label>Quality<select value={f.quality} onChange={e => setF({ ...f, quality: +e.target.value })}>{quality}</select></label>
+          <label>Opening bales<input type="number" min="0" step="1" value={f.bales} onChange={e => setF({ ...f, bales: e.target.value })} required style={{ width: 120 }} /></label>
+          <button className="btn primary">Add opening balance</button>
+        </form>
+      </div>
+      <div className="card">
+        <table>
+          <thead><tr><th>Date</th><th>Unit</th><th>Quality</th><th>Opening bales</th><th /></tr></thead>
+          <tbody>
+            {rows.map(o => (
+              <tr key={o.id}>
+                <td><input type="date" value={o.date} onChange={e => e.target.value && edit(o, { date: e.target.value })} /></td>
+                <td><select value={o.unit} onChange={e => edit(o, { unit: e.target.value })}>
+                  {units.some(u => u.code === o.unit) || <option value={o.unit}>{unitName(o.unit)}</option>}
+                  {units.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></td>
+                <td><select value={o.quality} onChange={e => edit(o, { quality: +e.target.value })}>{quality}</select></td>
+                <td><input type="number" min="0" step="1" key={o.bales} defaultValue={o.bales} onBlur={e => e.target.value !== '' && +e.target.value !== o.bales && edit(o, { bales: e.target.value })} /></td>
+                <td><button className="x" title="Delete" onClick={() => del(o)}>✕</button></td></tr>
+            ))}
+            {!rows.length && <tr><td colSpan="5" className="mute">No opening balances yet</td></tr>}
+          </tbody>
+        </table>
       </div>
     </>
   );
@@ -441,6 +543,9 @@ function BrandGrid({ kind, title, date, withActual }) {
   const [rows, setRows] = useState([]);
   const [actuals, setActuals] = useState({}); // row label -> actual count
   const [ranges, setRanges] = useState([]); // count ranges from Master, offered in the dropdowns
+  const [units, setUnits] = useState({}); // row label -> unit code
+  const [mast, setMast] = useState({ units: [], places: [] }); // units and places from Master
+  const [cellPlaces, setCellPlaces] = useState({}); // "brand|row" -> { place: { qty } }
   const [cols, setCols] = useState([]);
   const [cells, setCells] = useState({}); // "brand|row" -> qty
   const [msg, setMsg] = useState('');
@@ -451,11 +556,15 @@ function BrandGrid({ kind, title, date, withActual }) {
     api(`/api/brand-stock/${kind}?date=${date}`).then(d => {
       const m = {};
       d.cells.forEach(c => { m[key(c.brand, c.count)] = c.qty || ''; });
-      setRows(d.rows); setActuals(d.actuals || {}); setCols(d.cols); setCells(m); setMsg('');
+      setRows(d.rows); setActuals(d.actuals || {}); setUnits(d.units || {});
+      const cp = {};
+      (d.places || []).forEach(p => { const k = key(p.brand, p.count); cp[k] = { ...cp[k], [p.place]: { qty: p.qty || '' } }; });
+      setCellPlaces(cp); setCols(d.cols); setCells(m); setMsg('');
     });
   }, [kind, date]);
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { if (withActual) api('/api/masters').then(m => setRanges(m.ranges)); }, [withActual]);
+  useEffect(() => { if (withActual) api('/api/masters').then(m => { setRanges(m.ranges); setMast({ units: m.units, places: m.places || [] }); }); }, [withActual]);
+  const placesOf = label => mast.places.filter(p => p.group === units[label]).map(p => p.name);
   // pick a different marketing count for a row: rename it on the server, then re-key what is typed but not saved yet
   const changeMarketing = async (old, label) => {
     if (!label || label === old) return;
@@ -463,7 +572,7 @@ function BrandGrid({ kind, title, date, withActual }) {
     catch (x) { return setMsg(x.message); }
     const rekey = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k.endsWith(`|${old}`) ? k.slice(0, -old.length) + label : k === old ? label : k, v]));
     setRows(rows.map(x => (x === old ? label : x)));
-    setCells(rekey(cells)); setActuals(rekey(actuals));
+    setCells(rekey(cells)); setActuals(rekey(actuals)); setUnits(rekey(units)); setCellPlaces(rekey(cellPlaces));
   };
   const isNew = label => label.startsWith('~new~'); // blank row from the Add button, no marketing count chosen yet
   const options = cur => [...new Set([...ranges, cur].filter(Boolean))];
@@ -499,7 +608,7 @@ function BrandGrid({ kind, title, date, withActual }) {
   const save = async () => {
     const list = [];
     cols.forEach(b => rows.forEach(r => {
-      if (cells[key(b, r)] !== undefined) list.push({ brand: b, count: r, qty: num(cells[key(b, r)]) });
+      if (cells[key(b, r)] !== undefined) list.push({ brand: b, count: r, qty: num(cells[key(b, r)]), ...(cellPlaces[key(b, r)] && { places: Object.fromEntries(Object.entries(cellPlaces[key(b, r)]).map(([p, v]) => [p, num(v.qty)])) }) });
     }));
     await api(`/api/brand-stock/${kind}`, { method: 'PUT', body: { date, cells: list } });
     setMsg('Saved');
@@ -516,21 +625,24 @@ function BrandGrid({ kind, title, date, withActual }) {
       <p className="mute">Enter the quantity for each count and brand. Pick brands and count ranges from Master with + Column and + Row.</p>
       <div className="grid-wrap">
         <table className="grid">
-          <thead><tr>{withActual ? <><th>Actual Count</th><th className="mk">Marketing</th></> : <th>Count range</th>}
+          <thead><tr>{withActual ? <><th>Unit</th><th>Actual Count</th><th className="mk">Marketing</th></> : <th>Count range</th>}
             {cols.map(b => <th key={b}>{b} <button className="x" title="Remove column" onClick={() => remove('cols', b)}>✕</button></th>)}
             <th className="tot">Total</th></tr></thead>
           <tbody>
             {rows.map(r => (
               <tr key={r}>
+                {withActual && <td><select value={units[r] ?? ''} onChange={e => setUnits({ ...units, [r]: e.target.value })}><option value="">Select unit</option>{mast.units.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></td>}
                 {withActual && <td><select value={actuals[r] ?? ''} onChange={e => setActuals({ ...actuals, [r]: e.target.value })}><option value="">Select count</option>{options(actuals[r]).map(x => <option key={x}>{x}</option>)}</select></td>}
                 <td className={withActual ? "mk" : ""}>{withActual ? <select value={isNew(r) ? '' : r} onChange={e => changeMarketing(r, e.target.value)}>{isNew(r) && <option value="">Select count</option>}{options(r).filter(x => !isNew(x) && (x === r || !rows.includes(x))).map(x => <option key={x}>{x}</option>)}</select> : r} <button className="x" title="Remove row" onClick={() => remove('rows', r)}>✕</button></td>
                 {cols.map(b => (
-                  <td key={b}><input type="number" min="0" value={cells[key(b, r)] ?? ''} onChange={e => setCells({ ...cells, [key(b, r)]: e.target.value })} style={{ width: 80 }} /></td>
+                  <td key={b}><input type="number" min="0" value={cells[key(b, r)] ?? ''} onChange={e => { setCells({ ...cells, [key(b, r)]: e.target.value }); setCellPlaces({ ...cellPlaces, [key(b, r)]: {} }); }} style={{ width: 80 }} />
+                    {withActual && <PlacesCalc title={b + (isNew(r) ? '' : ' · ' + r)} places={placesOf(r)} fields={[['qty', b]]} value={cellPlaces[key(b, r)]}
+                      onApply={(t, p) => { setCells({ ...cells, [key(b, r)]: t.qty ? String(t.qty) : '' }); setCellPlaces({ ...cellPlaces, [key(b, r)]: p }); }} />}</td>
                 ))}
                 <td className="tot"><b>{total(cols, [r])}</b></td></tr>
             ))}
           </tbody>
-          <tfoot><tr><td>TOTAL</td>{withActual && <td className="mk" />}{cols.map(b => <td key={b}><b>{total([b], rows)}</b></td>)}
+          <tfoot><tr><td>TOTAL</td>{withActual && <><td /><td className="mk" /></>}{cols.map(b => <td key={b}><b>{total([b], rows)}</b></td>)}
             <td className="tot"><b>{total(cols, rows)}</b></td></tr></tfoot>
         </table>
       </div>

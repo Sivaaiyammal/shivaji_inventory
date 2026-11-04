@@ -28,8 +28,22 @@ CREATE TABLE IF NOT EXISTS brand_stock (
 CREATE TABLE IF NOT EXISTS sheet_rows (kind TEXT NOT NULL, label TEXT NOT NULL, sort INTEGER NOT NULL, PRIMARY KEY(kind, label));
 CREATE TABLE IF NOT EXISTS sheet_cols (kind TEXT NOT NULL, brand TEXT NOT NULL, sort INTEGER NOT NULL, PRIMARY KEY(kind, brand));
 -- count ranges (e.g. 3/56 - 3/62): row choices for the Chippam / Cone Bags sheets
+-- places belong to a group, which is one of the units
+CREATE TABLE IF NOT EXISTS places  (name TEXT PRIMARY KEY, grp TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS ranges  (name TEXT PRIMARY KEY, active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS brands (name TEXT PRIMARY KEY, active INTEGER NOT NULL DEFAULT 1);
+-- how a single cone cell was made up: bags and loose cones counted at each place of the unit
+CREATE TABLE IF NOT EXISTS single_cone_places (
+  date TEXT NOT NULL, unit TEXT NOT NULL, count TEXT NOT NULL, place TEXT NOT NULL,
+  bags INTEGER DEFAULT 0, cones INTEGER DEFAULT 0, PRIMARY KEY(date, unit, count, place));
+-- brand cell made up of quantities counted at each place of the row's unit
+CREATE TABLE IF NOT EXISTS brand_stock_places (
+  kind TEXT NOT NULL, date TEXT NOT NULL, brand TEXT NOT NULL, count TEXT NOT NULL, place TEXT NOT NULL,
+  qty INTEGER DEFAULT 0, PRIMARY KEY(kind, date, brand, count, place));
+-- opening bale stock per unit and quality from a date (Master > Opening balances); counted in the Bale Stock table
+CREATE TABLE IF NOT EXISTS opening_balances (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, unit TEXT NOT NULL,
+  quality INTEGER NOT NULL CHECK(quality IN (1,2)), bales INTEGER NOT NULL);
 -- cone winding done by outside parties
 CREATE TABLE IF NOT EXISTS winding (
   id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, party TEXT NOT NULL,
@@ -39,6 +53,10 @@ CREATE TABLE IF NOT EXISTS winding (
 // Chippam rows carry an 'Actual Count' next to the marketing count (the row label)
 if (!db.prepare('PRAGMA table_info(sheet_rows)').all().some(c => c.name === 'actual'))
   db.exec("ALTER TABLE sheet_rows ADD COLUMN actual TEXT DEFAULT ''");
+
+// Chippam / Cone Bags rows also carry the unit they belong to
+if (!db.prepare('PRAGMA table_info(sheet_rows)').all().some(c => c.name === 'unit'))
+  db.exec("ALTER TABLE sheet_rows ADD COLUMN unit TEXT DEFAULT ''");
 
 // calculator formulas typed for a cell, e.g. 10+20+30-20 (shown next to the bags / loose cones inputs)
 for (const col of ['bags_expr', 'cones_expr'])

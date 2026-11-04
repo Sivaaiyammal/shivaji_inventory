@@ -7,8 +7,10 @@ export function baleStock(date) {
       SUM(CASE WHEN type='IN' THEN weight_kg ELSE -weight_kg END) weight_kg
     FROM bale_moves WHERE date <= ? GROUP BY unit, quality`).all(date);
   const units = db.prepare('SELECT code FROM units WHERE active=1 ORDER BY sort').all().map(u => u.code);
+  const opening = db.prepare('SELECT unit, quality, SUM(bales) bales FROM opening_balances WHERE date <= ? GROUP BY unit, quality').all(date);
+  const open = (u, q) => opening.find(o => o.unit === u && o.quality === q)?.bales || 0;
   return units.map(u => {
-    const g = q => rows.find(r => r.unit === u && r.quality === q) || { bales: 0, weight_kg: 0 };
+    const g = q => { const m = rows.find(r => r.unit === u && r.quality === q) || { bales: 0, weight_kg: 0 }; return { ...m, bales: m.bales + open(u, q) }; };
     return { unit: u, q1: g(1), q2: g(2), bales: g(1).bales + g(2).bales, weight_kg: g(1).weight_kg + g(2).weight_kg };
   });
 }
