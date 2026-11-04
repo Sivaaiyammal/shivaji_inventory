@@ -128,6 +128,18 @@ app.delete('/api/parties/:name', (req, res) => {
 // Bale ledger (receipts + mixing issues)
 app.get('/api/bales', (req, res) => res.json(
   db.prepare('SELECT * FROM bale_moves WHERE date=? ORDER BY id DESC').all(D(req.query))));
+// Running bale stock up to a date: received, issued and balance per unit and quality
+app.get('/api/bale-stock', (req, res) => {
+  const date = D(req.query);
+  const rows = db.prepare(`SELECT unit, quality,
+      SUM(CASE WHEN type='IN' THEN bales ELSE 0 END) rec, SUM(CASE WHEN type='MIX' THEN bales ELSE 0 END) iss
+    FROM bale_moves WHERE date <= ? GROUP BY unit, quality`).all(date);
+  const units = db.prepare('SELECT code, name FROM units WHERE active=1 ORDER BY sort').all();
+  res.json(units.map(u => {
+    const g = q => rows.find(r => r.unit === u.code && r.quality === q) || { rec: 0, iss: 0 };
+    return { unit: u.code, name: u.name, q1: { rec: g(1).rec, iss: g(1).iss }, q2: { rec: g(2).rec, iss: g(2).iss } };
+  }));
+});
 app.post('/api/bales', (req, res) => {
   const b = req.body;
   if (!['IN', 'MIX'].includes(b.type) || ![1, 2].includes(+b.quality) || !(+b.bales > 0))

@@ -49,7 +49,7 @@ function Bales({ date, masters }) {
   const [err, setErr] = useState('');
   const load = useCallback(() => {
     api(`/api/bales?date=${date}`).then(setMoves);
-    api(`/api/report?date=${date}`).then(r => setStock(r.bales));
+    api(`/api/bale-stock?date=${date}`).then(setStock);
   }, [date]);
   useEffect(load, [load]);
   const save = async e => {
@@ -61,15 +61,6 @@ function Bales({ date, masters }) {
   const edit = async (m, patch) => {
     setErr('');
     try { await api(`/api/bales/${m.id}`, { method: 'PUT', body: { ...m, ...patch } }); }
-    catch (x) { setErr(x.message); }
-    load();
-  };
-  // stock is received minus mixing, so editing a stock cell saves the difference as a correcting entry
-  const adjust = async (unit, quality, current, v) => {
-    const diff = num(v) - current;
-    if (!diff) return;
-    setErr('');
-    try { await api('/api/bales', { method: 'POST', body: { type: diff > 0 ? 'IN' : 'MIX', unit, quality, bales: Math.abs(diff), note: 'Stock adjustment', date } }); }
     catch (x) { setErr(x.message); }
     load();
   };
@@ -91,30 +82,69 @@ function Bales({ date, masters }) {
         {err && <div className="err">{err}</div>}
       </div>
 
-      <div className="card">
-        <h2>Bale stock as on {date}</h2>
-        <BaleTable stock={stock} adjust={adjust} />
+      <div className="two">
+        <BaleEntries title="Received" rows={moves.filter(m => m.type === 'IN')} baleUnits={baleUnits} edit={edit} del={del} date={date} />
+        <BaleEntries title="Issued" rows={moves.filter(m => m.type === 'MIX')} baleUnits={baleUnits} edit={edit} del={del} date={date} />
       </div>
 
       <div className="card">
-        <h2>Entries on {date}</h2>
-        <table>
-          <thead><tr><th>Entry</th><th>Unit</th><th>Quality</th><th>Bales</th><th>Note</th><th /></tr></thead>
-          <tbody>
-            {moves.map(m => (
-              <tr key={m.id}>
-                <td><select value={m.type} onChange={e => edit(m, { type: e.target.value })}><option value="IN">Received</option><option value="MIX">Issued</option></select></td>
-                <td><select value={m.unit} onChange={e => edit(m, { unit: e.target.value })}>{baleUnits.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></td>
-                <td><select value={m.quality} onChange={e => edit(m, { quality: +e.target.value })}><option value={1}>1st</option><option value={2}>2nd</option></select></td>
-                <td><input type="number" min="1" key={m.bales} defaultValue={m.bales} onBlur={e => +e.target.value !== m.bales && edit(m, { bales: e.target.value })} /></td>
-                <td style={{ textAlign: 'left' }}>{m.note}</td>
-                <td><button className="x" onClick={() => del(m.id)}>✕</button></td></tr>
-            ))}
-            {!moves.length && <tr><td colSpan="6" className="mute">No entries for this date</td></tr>}
-          </tbody>
-        </table>
+        <h2>Stock as on {date} <span className="mute">(received − issued)</span></h2>
+        <BaleStockTable rows={stock} />
       </div>
     </>
+  );
+}
+
+// Stock = received - issued, running total up to the selected date (read-only)
+function BaleStockTable({ rows }) {
+  const sum = f => rows.reduce((s, r) => s + f(r), 0);
+  const cols = [
+    ['1st quality', r => r.q1], ['2nd quality', r => r.q2],
+    ['Total', r => ({ rec: r.q1.rec + r.q2.rec, iss: r.q1.iss + r.q2.iss })],
+  ];
+  return (
+    <table className="stock">
+      <thead>
+        <tr><th rowSpan="2">Unit</th>{cols.map(([t]) => <th key={t} colSpan="3" className="grp">{t}</th>)}</tr>
+        <tr>{cols.map(([t]) => ['Received', 'Issued', 'Stock'].map(h => <th key={t + h} className={h === 'Stock' ? 'stk' : ''}>{h}</th>))}</tr>
+      </thead>
+      <tbody>
+        {rows.map(r => (
+          <tr key={r.unit}><td>{r.name}</td>
+            {cols.map(([t, get]) => { const v = get(r); return [<td key={t + 'r'}>{v.rec}</td>, <td key={t + 'i'}>{v.iss}</td>, <td key={t + 's'} className="stk"><b>{v.rec - v.iss}</b></td>]; })}
+          </tr>
+        ))}
+        {!rows.length && <tr><td colSpan="10" className="mute">No units</td></tr>}
+      </tbody>
+      <tfoot><tr><td>TOTAL</td>
+        {cols.map(([t, get]) => [<td key={t + 'r'}>{sum(r => get(r).rec)}</td>, <td key={t + 'i'}>{sum(r => get(r).iss)}</td>, <td key={t + 's'} className="stk">{sum(r => get(r).rec - get(r).iss)}</td>])}
+      </tr></tfoot>
+    </table>
+  );
+}
+
+// One ledger table on the Bale Stock tab: Received (type IN) or Issued (type MIX)
+function BaleEntries({ title, rows, baleUnits, edit, del, date }) {
+  const total = rows.reduce((s, m) => s + m.bales, 0);
+  return (
+    <div className="card">
+      <h2>{title} on {date}</h2>
+      <table>
+        <thead><tr><th>Unit</th><th>Quality</th><th>Bales</th><th>Note</th><th /></tr></thead>
+        <tbody>
+          {rows.map(m => (
+            <tr key={m.id}>
+              <td><select value={m.unit} onChange={e => edit(m, { unit: e.target.value })}>{baleUnits.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></td>
+              <td><select value={m.quality} onChange={e => edit(m, { quality: +e.target.value })}><option value={1}>1st</option><option value={2}>2nd</option></select></td>
+              <td><input type="number" min="1" key={m.bales} defaultValue={m.bales} onBlur={e => +e.target.value !== m.bales && edit(m, { bales: e.target.value })} /></td>
+              <td style={{ textAlign: 'left' }}>{m.note}</td>
+              <td><button className="x" onClick={() => del(m.id)}>✕</button></td></tr>
+          ))}
+          {!rows.length && <tr><td colSpan="5" className="mute">No entries for this date</td></tr>}
+        </tbody>
+        <tfoot><tr><td>TOTAL</td><td /><td>{total}</td><td /><td /></tr></tfoot>
+      </table>
+    </div>
   );
 }
 

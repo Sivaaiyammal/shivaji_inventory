@@ -104,3 +104,12 @@ td:has(input) { white-space:nowrap; }
 .calc-res { margin-top:10px; font-size:20px; font-weight:700; min-height:28px; color:var(--accent); }
 .calc-res.bad { color:#c0392b; font-size:14px; font-weight:400; }
 .calc-acts { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }
+
+/* Bale Stock: Received and Issued side by side */
+.two { display:grid; grid-template-columns:1fr 1fr; gap:16px; align-items:start; }
+@media (max-width: 1000px) { .two { grid-template-columns:1fr; } }
+
+/* Bale stock summary: received / issued / stock per quality */
+.stock th.grp { text-align:center; }
+.stock .stk { background:#f1f5f4; }
+.stock tbody td.stk b, .stock tfoot td.stk { color:var(--accent); }
