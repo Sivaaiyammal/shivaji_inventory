@@ -4,6 +4,8 @@ import { createPortal } from 'react-dom';
 const api = async (url, opts) => {
   const r = await fetch(url, opts && { ...opts, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts.body) });
   const j = await r.json();
+  // session expired or never logged in: send the user back to the login page
+  if (r.status === 401 && !url.startsWith('/api/login') && !url.startsWith('/api/me')) window.dispatchEvent(new Event('auth-lost'));
   if (!r.ok) throw new Error(j.error || 'Request failed');
   return j;
 };
@@ -13,7 +15,44 @@ const num = v => (v === '' || v == null ? 0 : +v);
 const rangeName = (from, to) => [from, to].map(x => (x || '').trim()).filter(Boolean).join(' - ');
 const fmt = n => (Math.round(n * 100) / 100).toLocaleString('en-IN');
 
+// Login gate: the app is only shown to a signed-in user
 export default function App() {
+  const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
+  useEffect(() => {
+    api('/api/me').then(r => setUser(r.user)).catch(() => setUser(null));
+    const out = () => setUser(null);
+    window.addEventListener('auth-lost', out);
+    return () => window.removeEventListener('auth-lost', out);
+  }, []);
+  if (user === undefined) return null;
+  if (!user) return <Login onLogin={setUser} />;
+  return <Shell user={user} onLogout={async () => { await api('/api/logout', { method: 'POST' }); setUser(null); }} />;
+}
+
+function Login({ onLogin }) {
+  const [f, setF] = useState({ username: '', password: '' });
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async e => {
+    e.preventDefault(); setErr(''); setBusy(true);
+    try { onLogin((await api('/api/login', { method: 'POST', body: f })).user); }
+    catch (x) { setErr(x.message); setBusy(false); }
+  };
+  return (
+    <div className="login-wrap">
+      <form className="card login" onSubmit={submit}>
+        <h1>Shivaji Inventory</h1>
+        <p className="mute">Sign in to continue</p>
+        <label>Username<input autoFocus autoComplete="username" value={f.username} onChange={e => setF({ ...f, username: e.target.value })} required /></label>
+        <label>Password<input type="password" autoComplete="current-password" value={f.password} onChange={e => setF({ ...f, password: e.target.value })} required /></label>
+        {err && <div className="err">{err}</div>}
+        <button className="btn primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+      </form>
+    </div>
+  );
+}
+
+function Shell({ user, onLogout }) {
   const [tab, setTab] = useState('bales');
   const [date, setDate] = useState(iso());
   const [masters, setMasters] = useState(null);
@@ -26,6 +65,8 @@ export default function App() {
         <nav>{tabs.map(([k, l]) => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}</button>)}</nav>
         <span className="spacer" />
         <label>Date <input type="date" value={date} onChange={e => setDate(e.target.value)} /></label>
+        <span className="mute">{user}</span>
+        <button className="btn sm" onClick={onLogout}>Log out</button>
       </header>
       <main>
         {!masters ? 'Loading…' : tab === 'bales' ? <Bales date={date} masters={masters} />

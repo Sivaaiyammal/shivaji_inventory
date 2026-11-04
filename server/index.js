@@ -4,9 +4,11 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { db } from './db.js';
 import { daily } from './report.js';
+import { mountAuth } from './auth.js';
 
 const app = express();
 app.use(express.json());
+mountAuth(app); // /api/login, /api/logout, /api/me and a session check on every other /api route
 const today = () => new Date().toISOString().slice(0, 10);
 const D = q => q.date || today();
 
