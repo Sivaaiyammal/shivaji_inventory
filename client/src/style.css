@@ -89,3 +89,18 @@ td:has(input) { white-space:nowrap; }
 .menu .mute { padding:7px 10px; }
 .menu.up { top:auto; bottom:100%; right:auto; left:0; margin:0 0 4px; }
 .grid tfoot tr.overall td { background:#f1f5f4; font-size:15px; border-top:2px solid var(--line); }
+.loose { color:#c0392b; font-size:12px; font-weight:600; margin-left:4px; }
+.eq { text-align:right; font-size:13px; margin-top:2px; }
+
+/* calculator beside bags / cones inputs */
+.calc-btn { border:0; background:none; cursor:pointer; padding:0 2px; font-size:14px; color:var(--mute); vertical-align:middle; opacity:.55; }
+.calc-btn:hover, .calc-btn.has { opacity:1; }
+.calc-btn.has { color:var(--accent); }
+.calc-back { position:fixed; inset:0; z-index:40; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; }
+.calc-pop { width:min(480px,100%); background:var(--card); border-radius:12px; box-shadow:0 20px 50px rgba(0,0,0,.3); padding:20px; }
+.calc-head { display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:12px; font-size:16px; }
+.calc-pop textarea { width:100%; text-align:left; font-size:22px; padding:12px 14px; border-radius:8px; font-variant-numeric:tabular-nums; resize:none; overflow-wrap:anywhere; word-break:break-all; font-family:inherit; line-height:1.4; border:1px solid var(--line); background:var(--card); color:var(--ink); }
+.calc-pop textarea:focus { outline:2px solid var(--accent); border-color:var(--accent); }
+.calc-res { margin-top:10px; font-size:20px; font-weight:700; min-height:28px; color:var(--accent); }
+.calc-res.bad { color:#c0392b; font-size:14px; font-weight:400; }
+.calc-acts { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }

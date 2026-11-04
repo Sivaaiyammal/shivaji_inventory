@@ -151,11 +151,12 @@ app.delete('/api/bales/:id', (req, res) => {
 // Single cone grid: cells = [{unit,count,bags,loose_cones}]
 app.put('/api/single-cone', (req, res) => {
   const { date, cells } = req.body;
-  const up = db.prepare(`INSERT INTO single_cone VALUES (?,?,?,?,?)
-    ON CONFLICT(date,unit,count) DO UPDATE SET bags=excluded.bags, loose_cones=excluded.loose_cones`);
+  const up = db.prepare(`INSERT INTO single_cone (date,unit,count,bags,loose_cones,bags_expr,cones_expr) VALUES (?,?,?,?,?,?,?)
+    ON CONFLICT(date,unit,count) DO UPDATE SET bags=excluded.bags, loose_cones=excluded.loose_cones,
+      bags_expr=excluded.bags_expr, cones_expr=excluded.cones_expr`);
   db.exec('BEGIN');
   try {
-    cells.forEach(c => up.run(date, c.unit, c.count, +c.bags || 0, +c.loose_cones || 0));
+    cells.forEach(c => up.run(date, c.unit, c.count, +c.bags || 0, +c.loose_cones || 0, c.bags_expr || '', c.cones_expr || ''));
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); return res.status(500).json({ error: e.message }); }
   res.json({ ok: true });

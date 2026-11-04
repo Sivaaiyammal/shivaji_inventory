@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS winding (
   count TEXT NOT NULL, weight_kg REAL NOT NULL, note TEXT DEFAULT '');
 `);
 
+// calculator formulas typed for a cell, e.g. 10+20+30-20 (shown next to the bags / loose cones inputs)
+for (const col of ['bags_expr', 'cones_expr'])
+  if (!db.prepare('PRAGMA table_info(single_cone)').all().some(c => c.name === col))
+    db.exec(`ALTER TABLE single_cone ADD COLUMN ${col} TEXT DEFAULT ''`);
+
 // soft-delete flag for master data (Master tab: Deactivate / Activate)
 for (const t of ['units', 'counts', 'parties'])
   if (!db.prepare(`PRAGMA table_info(${t})`).all().some(c => c.name === 'active'))

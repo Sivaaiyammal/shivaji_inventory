@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 const api = async (url, opts) => {
   const r = await fetch(url, opts && { ...opts, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts.body) });
@@ -136,6 +137,52 @@ function BaleTable({ stock, adjust }) {
   );
 }
 
+// Evaluate a simple sum like "10+20+30-20"; only digits and + - * / ( ) . are accepted
+const calc = text => {
+  const t = text.trim();
+  if (!t || !/^[0-9+\-*/().\s]+$/.test(t)) return null;
+  try {
+    const v = Function(`"use strict"; return (${t})`)();
+    return Number.isFinite(v) ? Math.round(v) : null;
+  } catch { return null; }
+};
+
+// Calculator icon beside an input: type a sum, press Enter to put the result in the input.
+// The sum is kept (expr) and shown on hover and when the popup is reopened.
+function CalcButton({ expr, value, title, onApply }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState('');
+  const show = () => { setText(expr || ''); setOpen(true); };
+  const result = calc(text);
+  const apply = () => {
+    if (result === null) return;
+    onApply(result, text.trim());
+    setOpen(false);
+  };
+  return (
+    <>
+      <button type="button" className={'calc-btn' + (expr ? ' has' : '')} onClick={show} title={expr ? `${expr} = ${value}` : 'Calculator'}>🖩</button>
+      {open && createPortal(
+        <div className="calc-back" onClick={() => setOpen(false)}>
+          <div className="calc-pop" onClick={e => e.stopPropagation()}>
+            <div className="calc-head"><b>Calculator</b><span className="mute">{title}</span></div>
+            <textarea autoFocus rows={3} value={text} placeholder="10+20+30-20" onChange={e => setText(e.target.value.replace(/\n/g, ' '))}
+              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); apply(); } else if (e.key === 'Escape') setOpen(false); }} />
+            <div className={'calc-res' + (text.trim() && result === null ? ' bad' : '')}>
+              {text.trim() ? (result === null ? 'Enter a valid sum, e.g. 10+20-5' : `= ${result}`) : 'Type a sum like 10+20+30-20, then press Enter'}
+            </div>
+            <div className="calc-acts">
+              <button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button>
+              <button type="button" className="btn primary" disabled={result === null} onClick={apply}>Add to input</button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
+
 function Single({ date, masters, setMasters }) {
   const [cells, setCells] = useState({}); // "unit|count" -> {bags, loose_cones}
   const [msg, setMsg] = useState('');
@@ -174,24 +221,29 @@ function Single({ date, masters, setMasters }) {
   useEffect(() => {
     api(`/api/single-cone?date=${date}`).then(({ cells }) => {
       const m = {};
-      cells.forEach(c => { m[key(c.unit, c.count)] = { bags: c.bags || '', loose_cones: c.loose_cones || '' }; });
+      cells.forEach(c => { m[key(c.unit, c.count)] = { bags: c.bags || '', loose_cones: c.loose_cones || '', bags_expr: c.bags_expr || '', cones_expr: c.cones_expr || '' }; });
       setCells(m); setMsg('');
     });
   }, [date]);
-  const upd = (u, c, field, v) => setCells({ ...cells, [key(u, c)]: { ...cells[key(u, c)], [field]: v } });
+  // typing straight into an input drops the sum that was saved for it (exprField)
+  const upd = (u, c, field, v, exprField) => setCells({ ...cells, [key(u, c)]: { ...cells[key(u, c)], [field]: v, ...(exprField && { [exprField]: '' }) } });
+  // calculator result: set the input and remember the sum
+  const setCalc = (u, c, field, v, exprField, text) => setCells({ ...cells, [key(u, c)]: { ...cells[key(u, c)], [field]: String(v), [exprField]: text } });
   const per = 40;
   // sum a set of cells: bags and loose cones are totalled separately; `all` = bags + loose cones converted at 40 per bag
   const sumCells = pairs => {
     let bags = 0, cones = 0;
     pairs.forEach(([u, c]) => { const x = cells[key(u, c)] || {}; bags += num(x.bags); cones += num(x.loose_cones); });
-    return { bags, cones, all: bags + Math.floor(cones / per) };
+    return { bags, cones, all: bags + Math.floor(cones / per), left: cones % per };
   };
+  // bags (40 loose cones = 1 bag) with the cones left over shown as loose cones
+  const Overall = ({ t }) => <><b>{t.all}</b>{t.left > 0 && <span className="loose"> ({t.left} Loose Cone)</span>}</>;
   const Pair = ({ t }) => <span className="pair"><b>{t.bags}</b><b>{t.cones}</b></span>;
   const save = async () => {
     const list = [];
     masters.units.forEach(u => masters.counts.forEach(c => {
       const x = cells[key(u.code, c)];
-      if (x) list.push({ unit: u.code, count: c, bags: num(x.bags), loose_cones: num(x.loose_cones) });
+      if (x) list.push({ unit: u.code, count: c, bags: num(x.bags), loose_cones: num(x.loose_cones), bags_expr: x.bags_expr || '', cones_expr: x.cones_expr || '' });
     }));
     await api('/api/single-cone', { method: 'PUT', body: { date, cells: list } });
     setMsg('Saved');
@@ -213,17 +265,19 @@ function Single({ date, masters, setMasters }) {
             <tr key={c}><td>{c} <button className="x" title="Remove row" onClick={() => removeItem('counts', c, c)}>✕</button></td>
               {masters.units.map(u => (
                 <td key={u.code}>
-                  <input type="number" min="0" placeholder="bags" value={cells[key(u.code, c)]?.bags ?? ''} onChange={e => upd(u.code, c, 'bags', e.target.value)} style={{ width: 62 }} />{' '}
-                  <input type="number" min="0" placeholder="cones" value={cells[key(u.code, c)]?.loose_cones ?? ''} onChange={e => upd(u.code, c, 'loose_cones', e.target.value)} style={{ width: 62 }} />
+                  <input type="number" min="0" placeholder="bags" value={cells[key(u.code, c)]?.bags ?? ''} onChange={e => upd(u.code, c, 'bags', e.target.value, 'bags_expr')} style={{ width: 62 }} />
+                  <CalcButton title={u.name + " · " + c + " · bags"} expr={cells[key(u.code, c)]?.bags_expr} value={cells[key(u.code, c)]?.bags} onApply={(v, t) => setCalc(u.code, c, 'bags', v, 'bags_expr', t)} />{' '}
+                  <input type="number" min="0" placeholder="cones" value={cells[key(u.code, c)]?.loose_cones ?? ''} onChange={e => upd(u.code, c, 'loose_cones', e.target.value, 'cones_expr')} style={{ width: 62 }} />
+                  <CalcButton title={u.name + " · " + c + " · loose cones"} expr={cells[key(u.code, c)]?.cones_expr} value={cells[key(u.code, c)]?.loose_cones} onApply={(v, t) => setCalc(u.code, c, 'loose_cones', v, 'cones_expr', t)} />
                 </td>
               ))}
-              <td className="tot"><Pair t={sumCells(masters.units.map(u => [u.code, c]))} /></td></tr>
+              <td className="tot">{(() => { const t = sumCells(masters.units.map(u => [u.code, c])); return <><Pair t={t} /><div className="eq">= <Overall t={t} /></div></>; })()}</td></tr>
           ))}
         </tbody>
         <tfoot><tr><td>TOTAL</td>{masters.units.map(u => <td key={u.code}><Pair t={sumCells(masters.counts.map(c => [u.code, c]))} /></td>)}
           <td className="tot"><Pair t={sumCells(masters.units.flatMap(u => masters.counts.map(c => [u.code, c])))} /></td></tr>
-          <tr className="overall"><td>OVERALL <span className="mute">(bags + cones/{per})</span></td>{masters.units.map(u => <td key={u.code}><b>{sumCells(masters.counts.map(c => [u.code, c])).all}</b></td>)}
-            <td className="tot"><b>{sumCells(masters.units.flatMap(u => masters.counts.map(c => [u.code, c]))).all}</b></td></tr>
+          <tr className="overall"><td>OVERALL <span className="mute">(bags + cones/{per})</span></td>{masters.units.map(u => <td key={u.code}><Overall t={sumCells(masters.counts.map(c => [u.code, c]))} /></td>)}
+            <td className="tot"><Overall t={sumCells(masters.units.flatMap(u => masters.counts.map(c => [u.code, c])))} /></td></tr>
         </tfoot>
       </table></div>
       <div className="menu-wrap" style={{ display: 'inline-block', marginTop: 10 }}>
@@ -250,13 +304,14 @@ function Master({ setMasters }) {
     catch (x) { setErr(x.message); return false; }
   };
   const SECTIONS = {
-    units: { title: 'Units', hint: 'Each unit is a column in Single Cone and a row in Bale Stock.', list: all.units, id: u => u.code, label: u => u.name, codeField: true },
+    units: { title: 'Units', hint: 'Each unit is a column in Single Cone and a row in Bale Stock.', list: all.units, id: u => u.code, label: () => '', show: u => u.name },
     counts: { title: 'Counts', hint: 'Each count is a row in Single Cone and an option in Cone Winding.', list: all.counts, id: c => c.code, label: () => '' },
     parties: { title: 'Companies / parties', hint: 'Parties used in Cone Winding.', list: all.parties, id: p => p.name, label: () => '' },
     brands: { title: 'Brands', hint: 'Brand names, used as columns in Chippam and Cone Bags.', list: all.brands, id: b => b.name, label: () => '' },
     ranges: { title: 'Count ranges', hint: 'Count ranges such as 3/56 - 3/62, used as rows in Chippam and Cone Bags.', list: all.ranges, id: r => r.name, label: () => '' },
   };
   const S = SECTIONS[sec];
+  const shown = it => (S.show ? S.show(it) : S.id(it));
   const switchSec = k => { setSec(k); setF({ code: '', name: '' }); setErr(''); };
   const add = async e => {
     e.preventDefault();
@@ -270,7 +325,7 @@ function Master({ setMasters }) {
     if (v) run(`/api/masters/${sec}/${enc(S.id(it))}`, 'PATCH', { name: v });
   };
   const toggle = it => run(`/api/masters/${sec}/${enc(S.id(it))}`, 'PATCH', { active: !it.active });
-  const del = it => window.confirm(`Delete ${S.id(it)}?`) && run(`/api/${sec}/${enc(S.id(it))}`, 'DELETE');
+  const del = it => window.confirm(`Delete ${shown(it)}?`) && run(`/api/${sec}/${enc(S.id(it))}`, 'DELETE');
   return (
     <>
       <div className="subtabs">
@@ -281,14 +336,13 @@ function Master({ setMasters }) {
       {err && <div className="err">{err}</div>}
       <div className="card">
         <form className="form" onSubmit={add}>
-          {S.codeField && <label>Code<input value={f.code} onChange={e => setF({ ...f, code: e.target.value })} placeholder="Code" style={{ width: 90 }} /></label>}
-          {sec === 'ranges' ? (
+                    {sec === 'ranges' ? (
             <>
               <label>From count<input value={f.code} onChange={e => setF({ ...f, code: e.target.value })} placeholder="e.g. 3/56" style={{ width: 110 }} required /></label>
               <label>To count<input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="e.g. 3/62" style={{ width: 110 }} /></label>
             </>
           ) : (
-            <label>{S.codeField ? 'Name' : 'New ' + { counts: 'count', parties: 'party', brands: 'brand' }[sec]}
+            <label>{'New ' + { units: 'unit', counts: 'count', parties: 'party', brands: 'brand' }[sec]}
               <input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder={sec === 'units' ? 'e.g. X Unit' : sec === 'counts' ? 'e.g. 30S' : 'Name'} required /></label>
           )}
           <button className="btn primary">Add {{ units: 'unit', counts: 'count', parties: 'party', brands: 'brand', ranges: 'range' }[sec]}</button>
@@ -297,7 +351,7 @@ function Master({ setMasters }) {
       <div className="card list">
         {S.list.map(it => (
           <div key={S.id(it)} className={'row' + (it.active ? '' : ' off')}>
-            <span className="name"><b>{S.id(it)}</b> <span className="mute">{S.label(it)}</span></span>
+            <span className="name"><b>{shown(it)}</b> <span className="mute">{S.label(it)}</span></span>
             <span className={'badge' + (it.active ? '' : ' off')}>{it.active ? 'Active' : 'Inactive'}</span>
             <span className="acts">
               <button className="btn sm" onClick={() => rename(it)}>Rename</button>
