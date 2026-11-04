@@ -185,6 +185,7 @@ app.get('/api/brand-stock/:kind', (req, res) => {
   const k = req.params.kind;
   res.json({
     rows: db.prepare('SELECT label FROM sheet_rows WHERE kind=? ORDER BY sort').all(k).map(r => r.label),
+    actuals: Object.fromEntries(db.prepare('SELECT label, actual FROM sheet_rows WHERE kind=?').all(k).map(r => [r.label, r.actual || ''])),
     cols: db.prepare('SELECT brand FROM sheet_cols WHERE kind=? ORDER BY sort').all(k).map(c => c.brand),
     cells: db.prepare('SELECT brand, count, qty FROM brand_stock WHERE kind=? AND date=?').all(k, D(req.query)),
   });
@@ -194,9 +195,26 @@ app.post('/api/brand-stock/:kind/rows', (req, res) => {
   const label = (req.body.label || '').trim();
   if (!KINDS.includes(req.params.kind) || !label) return res.status(400).json({ error: 'Row name required' });
   const next = db.prepare('SELECT COALESCE(MAX(sort),-1)+1 n FROM sheet_rows WHERE kind=?').get(req.params.kind).n;
-  db.prepare('INSERT OR IGNORE INTO ranges (name) VALUES (?)').run(label);
-  db.prepare('UPDATE ranges SET active=1 WHERE name=?').run(label);
-  db.prepare('INSERT OR IGNORE INTO sheet_rows VALUES (?,?,?)').run(req.params.kind, label, next);
+  // a blank row added with the Add button (label ~new~...) is not a count range yet
+  if (!label.startsWith('~new~')) {
+    db.prepare('INSERT OR IGNORE INTO ranges (name) VALUES (?)').run(label);
+    db.prepare('UPDATE ranges SET active=1 WHERE name=?').run(label);
+  }
+  db.prepare('INSERT OR IGNORE INTO sheet_rows (kind,label,sort) VALUES (?,?,?)').run(req.params.kind, label, next);
+  res.json({ ok: true });
+});
+// change a row's marketing count: renames the row and its saved quantities
+app.patch('/api/brand-stock/:kind/rows/:label', (req, res) => {
+  const k = req.params.kind, old = req.params.label, label = (req.body.label || '').trim();
+  if (!KINDS.includes(k) || !label) return res.status(400).json({ error: 'Count required' });
+  if (label !== old && db.prepare('SELECT 1 FROM sheet_rows WHERE kind=? AND label=?').get(k, label))
+    return res.status(409).json({ error: label + ' is already on this sheet' });
+  db.exec('BEGIN');
+  try {
+    db.prepare('UPDATE sheet_rows SET label=? WHERE kind=? AND label=?').run(label, k, old);
+    db.prepare('UPDATE brand_stock SET count=? WHERE kind=? AND count=?').run(label, k, old);
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); return res.status(500).json({ error: e.message }); }
   res.json({ ok: true });
 });
 app.delete('/api/brand-stock/:kind/rows/:label', (req, res) => {
@@ -209,7 +227,7 @@ app.post('/api/brand-stock/:kind/cols', (req, res) => {
   const next = db.prepare('SELECT COALESCE(MAX(sort),-1)+1 n FROM sheet_cols WHERE kind=?').get(req.params.kind).n;
   db.prepare('INSERT OR IGNORE INTO brands (name) VALUES (?)').run(name);
   db.prepare('UPDATE brands SET active=1 WHERE name=?').run(name);
-  db.prepare('INSERT OR IGNORE INTO sheet_cols VALUES (?,?,?)').run(req.params.kind, name, next);
+  db.prepare('INSERT OR IGNORE INTO sheet_cols (kind,brand,sort) VALUES (?,?,?)').run(req.params.kind, name, next);
   res.json({ ok: true });
 });
 app.delete('/api/brand-stock/:kind/cols/:brand', (req, res) => {
@@ -218,12 +236,13 @@ app.delete('/api/brand-stock/:kind/cols/:brand', (req, res) => {
 });
 app.put('/api/brand-stock/:kind', (req, res) => {
   if (!KINDS.includes(req.params.kind)) return res.status(404).json({ error: 'Unknown sheet' });
-  const { date, cells } = req.body;
+  const { date, cells, actuals } = req.body;
   const up = db.prepare(`INSERT INTO brand_stock VALUES (?,?,?,?,?)
     ON CONFLICT(kind,date,brand,count) DO UPDATE SET qty=excluded.qty`);
   db.exec('BEGIN');
   try {
     cells.forEach(c => up.run(req.params.kind, date, c.brand, c.count, +c.qty || 0));
+    Object.entries(actuals || {}).forEach(([label, v]) => db.prepare('UPDATE sheet_rows SET actual=? WHERE kind=? AND label=?').run(String(v).trim(), req.params.kind, label));
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); return res.status(500).json({ error: e.message }); }
   res.json({ ok: true });

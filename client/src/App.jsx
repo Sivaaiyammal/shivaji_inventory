@@ -11,8 +11,6 @@ const api = async (url, opts) => {
 };
 const iso = () => new Date().toISOString().slice(0, 10);
 const num = v => (v === '' || v == null ? 0 : +v);
-// count range label, e.g. "3/56 - 3/62"; a single count when "to" is left empty
-const rangeName = (from, to) => [from, to].map(x => (x || '').trim()).filter(Boolean).join(' - ');
 const fmt = n => (Math.round(n * 100) / 100).toLocaleString('en-IN');
 
 // Login gate: the app is only shown to a signed-in user
@@ -72,8 +70,8 @@ function Shell({ user, onLogout }) {
         {!masters ? 'Loading…' : tab === 'bales' ? <Bales date={date} masters={masters} />
           : tab === 'single' ? <Single date={date} masters={masters} setMasters={setMasters} />
           : tab === 'winding' ? <Winding date={date} masters={masters} setMasters={setMasters} />
-          : tab === 'chippam' ? <BrandGrid kind="chippam" title="Chippam" date={date} />
-          : tab === 'conebags' ? <BrandGrid kind="conebags" title="Cone bags" date={date} />
+          : tab === 'chippam' ? <BrandGrid kind="chippam" title="Chippam" date={date} withActual />
+          : tab === 'conebags' ? <BrandGrid kind="conebags" title="Cone bags" date={date} withActual />
           : tab === 'master' ? <Master setMasters={setMasters} />
           : <Report date={date} />}
       </main>
@@ -316,7 +314,7 @@ function Single({ date, masters, setMasters }) {
       const x = cells[key(u.code, c)];
       if (x) list.push({ unit: u.code, count: c, bags: num(x.bags), loose_cones: num(x.loose_cones), bags_expr: x.bags_expr || '', cones_expr: x.cones_expr || '' });
     }));
-    await api('/api/single-cone', { method: 'PUT', body: { date, cells: list } });
+    await api('/api/single-cone', { method: 'PUT', body: { date, cells: list, ...(withActual && { actuals }) } });
     setMsg('Saved');
   };
   return (
@@ -388,7 +386,7 @@ function Master({ setMasters }) {
     e.preventDefault();
     const [url, body] = sec === 'units' ? ['/api/units', { code: f.code, name: f.name }]
       : sec === 'counts' ? ['/api/counts', { code: f.name }]
-      : sec === 'ranges' ? ['/api/ranges', { name: rangeName(f.code, f.name) }] : [`/api/${sec}`, { name: f.name }];
+      : sec === 'ranges' ? ['/api/ranges', { name: f.name.trim() }] : [`/api/${sec}`, { name: f.name }];
     if (await run(url, 'POST', body)) setF({ code: '', name: '' });
   };
   const rename = it => {
@@ -409,8 +407,7 @@ function Master({ setMasters }) {
         <form className="form" onSubmit={add}>
                     {sec === 'ranges' ? (
             <>
-              <label>From count<input value={f.code} onChange={e => setF({ ...f, code: e.target.value })} placeholder="e.g. 3/56" style={{ width: 110 }} required /></label>
-              <label>To count<input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="e.g. 3/62" style={{ width: 110 }} /></label>
+              <label>To count<input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="e.g. 3/62" style={{ width: 110 }} required /></label>
             </>
           ) : (
             <label>{'New ' + { units: 'unit', counts: 'count', parties: 'party', brands: 'brand' }[sec]}
@@ -439,8 +436,11 @@ function Master({ setMasters }) {
 
 // Count (rows) x brand (columns) closing-stock sheet, used by the Chippam and Cone Bags tabs.
 // Each sheet keeps its own rows and brand columns.
-function BrandGrid({ kind, title, date }) {
+// withActual: Chippam shows an editable Actual Count beside the Marketing count (the row label)
+function BrandGrid({ kind, title, date, withActual }) {
   const [rows, setRows] = useState([]);
+  const [actuals, setActuals] = useState({}); // row label -> actual count
+  const [ranges, setRanges] = useState([]); // count ranges from Master, offered in the dropdowns
   const [cols, setCols] = useState([]);
   const [cells, setCells] = useState({}); // "brand|row" -> qty
   const [msg, setMsg] = useState('');
@@ -451,10 +451,22 @@ function BrandGrid({ kind, title, date }) {
     api(`/api/brand-stock/${kind}?date=${date}`).then(d => {
       const m = {};
       d.cells.forEach(c => { m[key(c.brand, c.count)] = c.qty || ''; });
-      setRows(d.rows); setCols(d.cols); setCells(m); setMsg('');
+      setRows(d.rows); setActuals(d.actuals || {}); setCols(d.cols); setCells(m); setMsg('');
     });
   }, [kind, date]);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { if (withActual) api('/api/masters').then(m => setRanges(m.ranges)); }, [withActual]);
+  // pick a different marketing count for a row: rename it on the server, then re-key what is typed but not saved yet
+  const changeMarketing = async (old, label) => {
+    if (!label || label === old) return;
+    try { await api(`/api/brand-stock/${kind}/rows/${enc(old)}`, { method: 'PATCH', body: { label } }); }
+    catch (x) { return setMsg(x.message); }
+    const rekey = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k.endsWith(`|${old}`) ? k.slice(0, -old.length) + label : k === old ? label : k, v]));
+    setRows(rows.map(x => (x === old ? label : x)));
+    setCells(rekey(cells)); setActuals(rekey(actuals));
+  };
+  const isNew = label => label.startsWith('~new~'); // blank row from the Add button, no marketing count chosen yet
+  const options = cur => [...new Set([...ranges, cur].filter(Boolean))];
   const openMenu = async type => {
     if (menu?.type === type) return setMenu(null);
     const m = await api('/api/masters');
@@ -466,7 +478,7 @@ function BrandGrid({ kind, title, date }) {
     catch (x) { setMsg(x.message); }
   };
   const remove = async (type, name) => {
-    if (!window.confirm(`Remove ${name} from this sheet?`)) return;
+    if (!window.confirm(`Remove ${name.startsWith('~new~') ? 'this row' : name} from this sheet?`)) return;
     try { await api(`/api/brand-stock/${kind}/${type}/${enc(name)}`, { method: 'DELETE' }); load(); }
     catch (x) { setMsg(x.message); }
   };
@@ -477,8 +489,7 @@ function BrandGrid({ kind, title, date }) {
       <button className="new" onClick={() => {
         let v;
         if (type === 'rows') {
-          const from = (window.prompt('From count (e.g. 3/56):') || '').trim();
-          v = from && rangeName(from, window.prompt('To count (e.g. 3/62, leave empty for a single count):'));
+          v = (window.prompt('To count (e.g. 3/62):') || '').trim();
         } else v = (window.prompt(`New ${noun}:`) || '').trim();
         if (v) addItem(type, v); else setMenu(null);
       }}>+ New {noun}…</button>
@@ -505,26 +516,32 @@ function BrandGrid({ kind, title, date }) {
       <p className="mute">Enter the quantity for each count and brand. Pick brands and count ranges from Master with + Column and + Row.</p>
       <div className="grid-wrap">
         <table className="grid">
-          <thead><tr><th>Count range</th>
+          <thead><tr>{withActual ? <><th>Actual Count</th><th className="mk">Marketing</th></> : <th>Count range</th>}
             {cols.map(b => <th key={b}>{b} <button className="x" title="Remove column" onClick={() => remove('cols', b)}>✕</button></th>)}
             <th className="tot">Total</th></tr></thead>
           <tbody>
             {rows.map(r => (
-              <tr key={r}><td>{r} <button className="x" title="Remove row" onClick={() => remove('rows', r)}>✕</button></td>
+              <tr key={r}>
+                {withActual && <td><select value={actuals[r] ?? ''} onChange={e => setActuals({ ...actuals, [r]: e.target.value })}><option value="">Select count</option>{options(actuals[r]).map(x => <option key={x}>{x}</option>)}</select></td>}
+                <td className={withActual ? "mk" : ""}>{withActual ? <select value={isNew(r) ? '' : r} onChange={e => changeMarketing(r, e.target.value)}>{isNew(r) && <option value="">Select count</option>}{options(r).filter(x => !isNew(x) && (x === r || !rows.includes(x))).map(x => <option key={x}>{x}</option>)}</select> : r} <button className="x" title="Remove row" onClick={() => remove('rows', r)}>✕</button></td>
                 {cols.map(b => (
                   <td key={b}><input type="number" min="0" value={cells[key(b, r)] ?? ''} onChange={e => setCells({ ...cells, [key(b, r)]: e.target.value })} style={{ width: 80 }} /></td>
                 ))}
                 <td className="tot"><b>{total(cols, [r])}</b></td></tr>
             ))}
           </tbody>
-          <tfoot><tr><td>TOTAL</td>{cols.map(b => <td key={b}><b>{total([b], rows)}</b></td>)}
+          <tfoot><tr><td>TOTAL</td>{withActual && <td className="mk" />}{cols.map(b => <td key={b}><b>{total([b], rows)}</b></td>)}
             <td className="tot"><b>{total(cols, rows)}</b></td></tr></tfoot>
         </table>
       </div>
-      <div className="menu-wrap" style={{ display: 'inline-block', marginTop: 10 }}>
-        <button type="button" className="btn" onClick={() => openMenu('rows')}>+ Row</button>
-        {picker('rows', 'count range')}
-      </div>
+      {withActual ? (
+        <button type="button" className="btn" style={{ marginTop: 10 }} onClick={() => addItem('rows', `~new~${Date.now()}`)}>Add</button>
+      ) : (
+        <div className="menu-wrap" style={{ display: 'inline-block', marginTop: 10 }}>
+          <button type="button" className="btn" onClick={() => openMenu('rows')}>+ Row</button>
+          {picker('rows', 'count range')}
+        </div>
+      )}
       <p><button className="btn primary" onClick={save}>Save</button> <span className="mute">{msg}</span></p>
     </div>
   );

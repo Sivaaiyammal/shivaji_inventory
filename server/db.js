@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS winding (
   count TEXT NOT NULL, weight_kg REAL NOT NULL, note TEXT DEFAULT '');
 `);
 
+// Chippam rows carry an 'Actual Count' next to the marketing count (the row label)
+if (!db.prepare('PRAGMA table_info(sheet_rows)').all().some(c => c.name === 'actual'))
+  db.exec("ALTER TABLE sheet_rows ADD COLUMN actual TEXT DEFAULT ''");
+
 // calculator formulas typed for a cell, e.g. 10+20+30-20 (shown next to the bags / loose cones inputs)
 for (const col of ['bags_expr', 'cones_expr'])
   if (!db.prepare('PRAGMA table_info(single_cone)').all().some(c => c.name === col))
@@ -61,12 +65,17 @@ const SHEETS = {
   chippam: { rows: ['3/56 - 3/62', '3/54 - 3/61', '3/45 - 3/56', '2/41 - 2/43', '2/36 - 2/40'], cols: ['Madurai', 'Plain'] },
   conebags: { rows: ['2/60 - 2/63', '2/41 - 2/43', '3/56 - 3/62', '3/45 - 3/56', '3/54', '2/50'], cols: ['Madurai', 'Plain', 'Secondz'] },
 };
+// seeded once per sheet, so rows or columns you remove later are not put back on restart
+db.exec('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY)');
 for (const [kind, s] of Object.entries(SHEETS)) {
-  if (db.prepare('SELECT COUNT(*) n FROM sheet_rows WHERE kind=?').get(kind).n) continue;
-  s.rows.forEach((l, i) => db.prepare('INSERT INTO sheet_rows VALUES (?,?,?)').run(kind, l, i));
+  if (db.prepare('SELECT 1 FROM meta WHERE k=?').get('seed:' + kind)) continue;
+  db.prepare('INSERT INTO meta (k) VALUES (?)').run('seed:' + kind);
+  // a sheet that already has rows or columns was laid out before: leave it as the user has it
+  if (db.prepare('SELECT (SELECT COUNT(*) FROM sheet_rows WHERE kind=?) + (SELECT COUNT(*) FROM sheet_cols WHERE kind=?) n').get(kind, kind).n) continue;
+  s.rows.forEach((l, i) => db.prepare('INSERT INTO sheet_rows (kind,label,sort) VALUES (?,?,?)').run(kind, l, i));
   s.cols.forEach((b, i) => {
     db.prepare('INSERT OR IGNORE INTO brands (name) VALUES (?)').run(b);
-    db.prepare('INSERT INTO sheet_cols VALUES (?,?,?)').run(kind, b, i);
+    db.prepare('INSERT INTO sheet_cols (kind,brand,sort) VALUES (?,?,?)').run(kind, b, i);
   });
 }
 

@@ -122,3 +122,10 @@ td:has(input) { white-space:nowrap; }
 .login label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--mute); }
 .login input { font-size:16px; padding:10px 12px; width:100%; }
 .login .btn { padding:10px; font-size:15px; }
+
+/* Chippam: Actual Count (text) + Marketing columns */
+.grid td input.txt { width:110px; text-align:left; }
+.grid th.mk, .grid td.mk { text-align:left; font-weight:600; }
+.grid td.mk { background:var(--card); }
+.grid tbody tr:nth-child(even) td.mk { background:#fafbfc; }
+.grid tbody tr:hover td.mk { background:#eef6f4; }
