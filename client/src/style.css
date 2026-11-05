@@ -137,3 +137,10 @@ td:has(input) { white-space:nowrap; }
 .places input { width:100%; text-align:right; font-size:16px; padding:6px 8px; }
 .places tfoot td { font-weight:700; background:var(--bg); }
 .calc-pop { max-height:90vh; overflow:auto; }
+
+/* Chippam / Cone Bags: unit name column and the per-unit "Add row" line */
+.grid td.unit { text-align:left; white-space:nowrap; }
+.grid tr.addrow td { text-align:left; background:#fafbfc; padding:6px 10px; position:static; }
+.grid tr.addrow:hover td { background:#fafbfc; }
+.grid td.unit .plus { margin-left:8px; border:1px solid var(--line); background:var(--card); color:var(--accent); border-radius:6px; width:24px; height:24px; line-height:1; font-size:16px; font-weight:700; cursor:pointer; vertical-align:middle; }
+.grid td.unit .plus:hover { background:var(--bg); }

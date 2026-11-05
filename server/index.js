@@ -241,6 +241,12 @@ const KINDS = ['chippam', 'conebags'];
 app.get('/api/brand-stock/:kind', (req, res) => {
   if (!KINDS.includes(req.params.kind)) return res.status(404).json({ error: 'Unknown sheet' });
   const k = req.params.kind;
+  // every active unit always has at least one row on the sheet (more can be added with the + beside the unit)
+  db.prepare('SELECT code FROM units WHERE active=1 ORDER BY sort').all().forEach(u => {
+    if (db.prepare('SELECT 1 FROM sheet_rows WHERE kind=? AND unit=?').get(k, u.code)) return;
+    const next = db.prepare('SELECT COALESCE(MAX(sort),-1)+1 n FROM sheet_rows WHERE kind=?').get(k).n;
+    db.prepare('INSERT OR IGNORE INTO sheet_rows (kind,label,sort,unit) VALUES (?,?,?,?)').run(k, `~new~default-${u.code}`, next, u.code);
+  });
   res.json({
     rows: db.prepare('SELECT label FROM sheet_rows WHERE kind=? ORDER BY sort').all(k).map(r => r.label),
     actuals: Object.fromEntries(db.prepare('SELECT label, actual FROM sheet_rows WHERE kind=?').all(k).map(r => [r.label, r.actual || ''])),
@@ -260,7 +266,7 @@ app.post('/api/brand-stock/:kind/rows', (req, res) => {
     db.prepare('INSERT OR IGNORE INTO ranges (name) VALUES (?)').run(label);
     db.prepare('UPDATE ranges SET active=1 WHERE name=?').run(label);
   }
-  db.prepare('INSERT OR IGNORE INTO sheet_rows (kind,label,sort) VALUES (?,?,?)').run(req.params.kind, label, next);
+  db.prepare('INSERT OR IGNORE INTO sheet_rows (kind,label,sort,unit) VALUES (?,?,?,?)').run(req.params.kind, label, next, String(req.body.unit || ''));
   res.json({ ok: true });
 });
 // change a row's marketing count: renames the row and its saved quantities

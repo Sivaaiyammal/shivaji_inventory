@@ -613,6 +613,32 @@ function BrandGrid({ kind, title, date, withActual }) {
     await api(`/api/brand-stock/${kind}`, { method: 'PUT', body: { date, cells: list } });
     setMsg('Saved');
   };
+  const row = (r, g, idx) => (
+              <tr key={r}>
+                                {withActual && <td className="unit"><b>{g?.name}</b>{g?.code && idx === 0 && <button type="button" className="plus" title={'Add another row for ' + g.name} onClick={() => addRowTo(g.code)}>+</button>}</td>}
+                {withActual && <td><select value={actuals[r] ?? ''} onChange={e => setActuals({ ...actuals, [r]: e.target.value })}><option value="">Select count</option>{options(actuals[r]).map(x => <option key={x}>{x}</option>)}</select></td>}
+                <td className={withActual ? "mk" : ""}>{withActual ? <select value={isNew(r) ? '' : r} onChange={e => changeMarketing(r, e.target.value)}>{isNew(r) && <option value="">Select count</option>}{options(r).filter(x => !isNew(x) && (x === r || !rows.includes(x))).map(x => <option key={x}>{x}</option>)}</select> : r} <button className="x" title="Remove row" onClick={() => remove('rows', r)}>✕</button></td>
+                {cols.map(b => (
+                  <td key={b}><input type="number" min="0" value={cells[key(b, r)] ?? ''} onChange={e => { setCells({ ...cells, [key(b, r)]: e.target.value }); setCellPlaces({ ...cellPlaces, [key(b, r)]: {} }); }} style={{ width: 80 }} />
+                    {withActual && <PlacesCalc title={b + (isNew(r) ? '' : ' · ' + r)} places={placesOf(r)} fields={[['qty', b]]} value={cellPlaces[key(b, r)]}
+                      onApply={(t, p) => { setCells({ ...cells, [key(b, r)]: t.qty ? String(t.qty) : '' }); setCellPlaces({ ...cellPlaces, [key(b, r)]: p }); }} />}</td>
+                ))}
+                <td className="tot"><b>{total(cols, [r])}</b></td></tr>
+  );
+  // Chippam / Cone Bags: every unit is listed, each with its own rows and its own Add button
+  const unitGroups = () => {
+    const g = mast.units.map(u => ({ code: u.code, name: u.name, rows: rows.filter(r => units[r] === u.code) }));
+    const loose = rows.filter(r => !mast.units.some(u => u.code === units[r]));
+    return loose.length ? [...g, { code: '', name: 'No unit', rows: loose }] : g;
+  };
+  const addRowTo = async unit => {
+    try { await api(`/api/brand-stock/${kind}/rows`, { method: 'POST', body: { label: `~new~${Date.now()}`, unit } }); load(); }
+    catch (x) { setMsg(x.message); }
+  };
+  // a unit with no row at all (only until the server has added its default row): just the unit and its +
+  const emptyUnit = g => (
+    <tr key={'empty-' + g.code}><td className="unit"><b>{g.name}</b><button type="button" className="plus" title={'Add a row for ' + g.name} onClick={() => addRowTo(g.code)}>+</button></td><td colSpan={cols.length + 4} /></tr>
+  );
   return (
     <div className="card">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -629,26 +655,13 @@ function BrandGrid({ kind, title, date, withActual }) {
             {cols.map(b => <th key={b}>{b} <button className="x" title="Remove column" onClick={() => remove('cols', b)}>✕</button></th>)}
             <th className="tot">Total</th></tr></thead>
           <tbody>
-            {rows.map(r => (
-              <tr key={r}>
-                {withActual && <td><select value={units[r] ?? ''} onChange={e => setUnits({ ...units, [r]: e.target.value })}><option value="">Select unit</option>{mast.units.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></td>}
-                {withActual && <td><select value={actuals[r] ?? ''} onChange={e => setActuals({ ...actuals, [r]: e.target.value })}><option value="">Select count</option>{options(actuals[r]).map(x => <option key={x}>{x}</option>)}</select></td>}
-                <td className={withActual ? "mk" : ""}>{withActual ? <select value={isNew(r) ? '' : r} onChange={e => changeMarketing(r, e.target.value)}>{isNew(r) && <option value="">Select count</option>}{options(r).filter(x => !isNew(x) && (x === r || !rows.includes(x))).map(x => <option key={x}>{x}</option>)}</select> : r} <button className="x" title="Remove row" onClick={() => remove('rows', r)}>✕</button></td>
-                {cols.map(b => (
-                  <td key={b}><input type="number" min="0" value={cells[key(b, r)] ?? ''} onChange={e => { setCells({ ...cells, [key(b, r)]: e.target.value }); setCellPlaces({ ...cellPlaces, [key(b, r)]: {} }); }} style={{ width: 80 }} />
-                    {withActual && <PlacesCalc title={b + (isNew(r) ? '' : ' · ' + r)} places={placesOf(r)} fields={[['qty', b]]} value={cellPlaces[key(b, r)]}
-                      onApply={(t, p) => { setCells({ ...cells, [key(b, r)]: t.qty ? String(t.qty) : '' }); setCellPlaces({ ...cellPlaces, [key(b, r)]: p }); }} />}</td>
-                ))}
-                <td className="tot"><b>{total(cols, [r])}</b></td></tr>
-            ))}
+            {withActual ? unitGroups().flatMap(g => (g.rows.length || !g.code ? g.rows.map((r, i) => row(r, g, i)) : [emptyUnit(g)])) : rows.map(r => row(r))}
           </tbody>
           <tfoot><tr><td>TOTAL</td>{withActual && <><td /><td className="mk" /></>}{cols.map(b => <td key={b}><b>{total([b], rows)}</b></td>)}
             <td className="tot"><b>{total(cols, rows)}</b></td></tr></tfoot>
         </table>
       </div>
-      {withActual ? (
-        <button type="button" className="btn" style={{ marginTop: 10 }} onClick={() => addItem('rows', `~new~${Date.now()}`)}>Add</button>
-      ) : (
+      {withActual ? null : (
         <div className="menu-wrap" style={{ display: 'inline-block', marginTop: 10 }}>
           <button type="button" className="btn" onClick={() => openMenu('rows')}>+ Row</button>
           {picker('rows', 'count range')}
