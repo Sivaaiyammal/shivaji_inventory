@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 const api = async (url, opts) => {
@@ -71,7 +71,7 @@ function Shell({ user, onLogout }) {
   }, []);
   const [masters, setMasters] = useState(null);
   useEffect(() => { api('/api/masters').then(setMasters); }, []);
-  const tabs = [['bales', 'Bale Stock'], ['single', 'Single Cone'], ['winding', 'Cone Winding'], ['chippam', 'Chippam'], ['conebags', 'Cone Bags'], ['report', 'Report / Print'], ['master', 'Master']];
+  const tabs = [['bales', 'Bale Stock'], ['single', 'Single Cone'], ['chippam', 'Chippam'], ['conebags', 'Cone Bags'], ['winding', 'Cone Winding'], ['report', 'Report / Print'], ['master', 'Master']];
   return (
     <>
       <header>
@@ -276,7 +276,7 @@ function PlacesCalc({ title, places, value, fields = [['bags', 'Bags'], ['cones'
 }
 
 // number box that also takes a sum such as 10+20+30+50: the result is applied on Enter / leaving the box
-function CalcInput({ value, onChange, placeholder }) {
+function CalcInput({ value, onChange, placeholder, disabled }) {
   const [text, setText] = useState(null); // null = not editing
   const [expr, setExpr] = useState(null); // the sum last typed, shown under the box while it still matches the value
   const commit = () => {
@@ -288,7 +288,7 @@ function CalcInput({ value, onChange, placeholder }) {
     }
     setText(null);
   };
-  return <span style={{ display: 'inline-flex', flexDirection: 'column', verticalAlign: 'top' }}><input type="text" inputMode="decimal" placeholder={placeholder} value={text ?? value} style={{ width: 62, textAlign: 'right' }}
+  return <span style={{ display: 'inline-flex', flexDirection: 'column', verticalAlign: 'top' }}><input type="text" inputMode="decimal" disabled={disabled} placeholder={placeholder} value={text ?? value} style={{ width: 62, textAlign: 'right' }}
     onFocus={e => { setText(String(value)); e.target.select(); }} onChange={e => setText(e.target.value)} onBlur={commit}
     onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }} />
     {expr && text === null && expr.out === String(value) && <small className="mute" title={expr.t + ' = ' + expr.out} style={{ textAlign: 'right', maxWidth: 62, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{expr.t}</small>}</span>;
@@ -310,8 +310,8 @@ function UnitPlacesTable({ unit, places: realPlaces, counts, cells, setPlace, se
     return { bags, cones };
   };
   const Pair = ({ t }) => <span className="pair"><b>{t.bags}</b><b>{t.cones}</b></span>;
-  // bags + cones converted at 40 per bag, e.g. 200 bags + 50 cones = 201 (1 Bag + 10 Loose Cone)
-  const Eq = ({ t }) => { const extra = Math.floor(t.cones / 40), left = t.cones % 40; return <span className="eq" style={{ whiteSpace: 'nowrap' }}>= <b>{t.bags + extra}</b>{t.cones > 0 && <span className="loose"> ({extra} Bag + {left} Loose Cone)</span>}</span>; };
+  // bags + cones converted at 40 per bag, e.g. 200 bags + 50 cones = 201 (Loose cone bag = 1)
+  const Eq = ({ t }) => { const extra = Math.floor(t.cones / 40), left = t.cones % 40; return <span className="eq" style={{ whiteSpace: 'nowrap' }}>= <b>{t.bags + extra}</b>{t.cones > 0 && <span className="loose"> (Loose cone bag = {extra})</span>}</span>; };
   const sub = <span className="pair sub"><span>bags</span><span>loose</span></span>;
   // only the counts picked from the dropdown (or already holding figures) are rows
   const hasData = c => places.some(p => num(val(c, p, 'bags')) || num(val(c, p, 'cones')));
@@ -628,6 +628,7 @@ function BrandGrid({ kind, title, date, withActual }) {
   const [cols, setCols] = useState([]);
   const [cells, setCells] = useState({}); // "brand|row" -> qty
   const [msg, setMsg] = useState('');
+  const [loaded, setLoaded] = useState(false);
   const [menu, setMenu] = useState(null); // {type:'cols'|'rows', items}: Master choices not yet on this sheet
   const key = (b, r) => `${b}|${r}`;
   const enc = encodeURIComponent;
@@ -638,10 +639,10 @@ function BrandGrid({ kind, title, date, withActual }) {
       setRows(d.rows); setActuals(d.actuals || {}); setUnits(d.units || {});
       const cp = {};
       (d.places || []).forEach(p => { const k = key(p.brand, p.count); cp[k] = { ...cp[k], [p.place]: { qty: p.qty || '' } }; });
-      setCellPlaces(cp); setCols(d.cols); setCells(m); setMsg('');
+      setCellPlaces(cp); setCols(d.cols); setCells(m); setMsg(''); setLoaded(true);
     });
   }, [kind, date]);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { setLoaded(false); load(); }, [load]);
   useEffect(() => { if (withActual) api('/api/masters').then(m => { setRanges(m.ranges); setMast({ units: m.units, places: m.places || [] }); }); }, [withActual]);
   const placesOf = label => mast.places.filter(p => p.group === units[label]).map(p => p.name);
   // pick a different marketing count for a row: rename it on the server, then re-key what is typed but not saved yet
@@ -692,32 +693,85 @@ function BrandGrid({ kind, title, date, withActual }) {
     await api(`/api/brand-stock/${kind}`, { method: 'PUT', body: { date, cells: list, ...(withActual && { actuals, units }) } });
     setMsg('Saved');
   };
+  const unitPlaces = code => mast.places.filter(p => p.group === code).map(p => p.name);
+  // a figure typed for one place: the brand cell becomes the sum of the unit's places
+  const setPlaceQty = (b, r, ps, p, v) => {
+    const k = key(b, r);
+    const cp = { ...cellPlaces[k], [p]: { qty: v } };
+    const sum = ps.reduce((t, x) => t + num(cp[x]?.qty), 0);
+    setCellPlaces({ ...cellPlaces, [k]: cp }); setCells({ ...cells, [k]: sum ? String(sum) : '' });
+  };
   const row = (r, g, idx) => (
               <tr key={r}>
-                                {withActual && <td className="unit"><b>{g?.name}</b>{g?.code && idx === 0 && <button type="button" className="plus" title={'Add another row for ' + g.name} onClick={() => addRowTo(g.code)}>+</button>}</td>}
                 {withActual && <td><select value={actuals[r] ?? ''} onChange={e => setActuals({ ...actuals, [r]: e.target.value })}><option value="">Select count</option>{options(actuals[r]).map(x => <option key={x}>{x}</option>)}</select></td>}
-                <td className={withActual ? "mk" : ""}>{withActual ? <select value={isNew(r) ? '' : r} onChange={e => changeMarketing(r, e.target.value)}>{isNew(r) && <option value="">Select count</option>}{options(r).filter(x => !isNew(x) && (x === r || !rows.includes(x))).map(x => <option key={x}>{x}</option>)}</select> : r} <button className="x" title="Remove row" onClick={() => remove('rows', r)}>✕</button></td>
-                {cols.map(b => (
-                  <td key={b}><input type="number" min="0" value={cells[key(b, r)] ?? ''} onChange={e => { setCells({ ...cells, [key(b, r)]: e.target.value }); setCellPlaces({ ...cellPlaces, [key(b, r)]: {} }); }} style={{ width: 80 }} />
-                    {withActual && <PlacesCalc title={b + (isNew(r) ? '' : ' · ' + r)} places={placesOf(r)} fields={[['qty', b]]} value={cellPlaces[key(b, r)]}
-                      onApply={(t, p) => { setCells({ ...cells, [key(b, r)]: t.qty ? String(t.qty) : '' }); setCellPlaces({ ...cellPlaces, [key(b, r)]: p }); }} />}</td>
-                ))}
+                <td className={withActual ? "mk" : ""}>{withActual ? <select value={isNew(r) ? '' : r} onChange={e => changeMarketing(r, e.target.value)}>{isNew(r) && <option value="">Select count</option>}{options(r).filter(x => !isNew(x) && (x === r || !rows.includes(x))).map(x => <option key={x}>{x}</option>)}</select> : r} {!(withActual && isNew(r)) && <button className="x" title="Remove row" onClick={() => remove('rows', r)}>✕</button>}</td>
+                {cols.map(b => {
+                  const ps = withActual ? unitPlaces(g?.code) : [];
+                  if (withActual && ps.length) {
+                    // a unit with places: one box per place, and the brand total after them
+                    const k = key(b, r);
+                    return <React.Fragment key={b}>
+                      {ps.map(p => <td key={p}><CalcInput placeholder="qty" disabled={isNew(r)} value={cellPlaces[k]?.[p]?.qty ?? ''} onChange={v => setPlaceQty(b, r, ps, p, v)} /></td>)}
+                      <td className="tot"><b>{num(cells[k])}</b></td>
+                    </React.Fragment>;
+                  }
+                  return (
+                    <td key={b}>{withActual ? (
+                      <CalcInput placeholder="qty" disabled={isNew(r)} value={cells[key(b, r)] ?? ''} onChange={v => { setCells({ ...cells, [key(b, r)]: v }); setCellPlaces({ ...cellPlaces, [key(b, r)]: {} }); }} />
+                    ) : <input type="number" min="0" value={cells[key(b, r)] ?? ''} onChange={e => setCells({ ...cells, [key(b, r)]: e.target.value })} style={{ width: 80 }} />}</td>
+                  );
+                })}
                 <td className="tot"><b>{total(cols, [r])}</b></td></tr>
   );
-  // Chippam / Cone Bags: every unit is listed, each with its own rows and its own Add button
+  // Chippam / Cone Bags: one table per unit; its last line is always a blank one, and choosing a marketing count there adds the next blank line
   const unitGroups = () => {
     const g = mast.units.map(u => ({ code: u.code, name: u.name, rows: rows.filter(r => units[r] === u.code) }));
     const loose = rows.filter(r => !mast.units.some(u => u.code === units[r]));
     return loose.length ? [...g, { code: '', name: 'No unit', rows: loose }] : g;
   };
   const addRowTo = async unit => {
-    try { await api(`/api/brand-stock/${kind}/rows`, { method: 'POST', body: { label: `~new~${Date.now()}`, unit } }); load(); }
+    try { await api(`/api/brand-stock/${kind}/rows`, { method: 'POST', body: { label: `~new~${Date.now()}-${unit}`, unit } }); load(); }
     catch (x) { setMsg(x.message); }
   };
-  // a unit with no row at all (only until the server has added its default row): just the unit and its +
-  const emptyUnit = g => (
-    <tr key={'empty-' + g.code}><td className="unit"><b>{g.name}</b><button type="button" className="plus" title={'Add a row for ' + g.name} onClick={() => addRowTo(g.code)}>+</button></td><td colSpan={cols.length + 4} /></tr>
-  );
+  const tried = useRef(new Set());
+  useEffect(() => {
+    if (!withActual || !loaded || !mast.units.length) return;
+    mast.units.forEach(u => {
+      if (rows.some(r => units[r] === u.code && isNew(r))) return;
+      const sig = kind + '|' + u.code + '|' + rows.join(',');
+      if (tried.current.has(sig)) return;
+      tried.current.add(sig);
+      addRowTo(u.code);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, units, mast.units, loaded, withActual]);
+  const unitTable = g => {
+    const ps = unitPlaces(g.code);
+    return (
+    <details key={g.code || 'none'} className="card unitcard" open>
+      <summary><b>{g.name}</b>{ps.length > 0 && <span className="mute"> by place</span>}</summary>
+      <div className="grid-wrap">
+        <table className="grid">
+          <thead>
+            <tr><th rowSpan={ps.length ? 2 : 1}>Actual Count</th><th rowSpan={ps.length ? 2 : 1} className="mk">Marketing</th>
+              {cols.map(b => <th key={b} colSpan={ps.length ? ps.length + 1 : 1} rowSpan={1} style={ps.length ? { textAlign: 'center' } : undefined}>{b} <button className="x" title="Remove column" onClick={() => remove('cols', b)}>✕</button></th>)}
+              <th className="tot" rowSpan={ps.length ? 2 : 1}>Total</th></tr>
+            {ps.length > 0 && <tr>{cols.map(b => <React.Fragment key={b}>{ps.map(p => <th key={p} style={{ top: 38 }}>{p}</th>)}<th className="tot" style={{ top: 38 }}>Total</th></React.Fragment>)}</tr>}
+          </thead>
+          <tbody>{g.rows.map((r, i) => row(r, g, i))}</tbody>
+          <tfoot><tr><td>TOTAL</td><td className="mk" />
+            {cols.map(b => ps.length ? (
+              <React.Fragment key={b}>
+                {ps.map(p => <td key={p}><b>{g.rows.reduce((t, r) => t + num(cellPlaces[key(b, r)]?.[p]?.qty), 0)}</b></td>)}
+                <td className="tot"><b>{total([b], g.rows)}</b></td>
+              </React.Fragment>
+            ) : <td key={b}><b>{total([b], g.rows)}</b></td>)}
+            <td className="tot"><b>{total(cols, g.rows)}</b></td></tr></tfoot>
+        </table>
+      </div>
+    </details>
+    );
+  };
   return (
     <div className="card">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -727,19 +781,24 @@ function BrandGrid({ kind, title, date, withActual }) {
           {picker('cols', 'brand')}
         </div>
       </div>
-      <p className="mute">Enter the quantity for each count and brand. Pick brands and count ranges from Master with + Column and + Row.</p>
+      <p className="mute">Enter the quantity for each count and brand. Pick a marketing count on the blank line of a unit to add a row; add brands with + Column.</p>
+      {withActual ? (
+        <>
+          <p><b>All units:</b> <b>{total(cols, rows)}</b></p>
+          {unitGroups().map(unitTable)}
+        </>
+      ) : (
       <div className="grid-wrap">
         <table className="grid">
-          <thead><tr>{withActual ? <><th>Unit</th><th>Actual Count</th><th className="mk">Marketing</th></> : <th>Count range</th>}
+          <thead><tr><th>Count range</th>
             {cols.map(b => <th key={b}>{b} <button className="x" title="Remove column" onClick={() => remove('cols', b)}>✕</button></th>)}
             <th className="tot">Total</th></tr></thead>
-          <tbody>
-            {withActual ? unitGroups().flatMap(g => (g.rows.length || !g.code ? g.rows.map((r, i) => row(r, g, i)) : [emptyUnit(g)])) : rows.map(r => row(r))}
-          </tbody>
-          <tfoot><tr><td>TOTAL</td>{withActual && <><td /><td className="mk" /></>}{cols.map(b => <td key={b}><b>{total([b], rows)}</b></td>)}
+          <tbody>{rows.map(r => row(r))}</tbody>
+          <tfoot><tr><td>TOTAL</td>{cols.map(b => <td key={b}><b>{total([b], rows)}</b></td>)}
             <td className="tot"><b>{total(cols, rows)}</b></td></tr></tfoot>
         </table>
       </div>
+      )}
       {withActual ? null : (
         <div className="menu-wrap" style={{ display: 'inline-block', marginTop: 10 }}>
           <button type="button" className="btn" onClick={() => openMenu('rows')}>+ Row</button>
