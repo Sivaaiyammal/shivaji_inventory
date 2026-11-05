@@ -144,3 +144,8 @@ td:has(input) { white-space:nowrap; }
 .grid tr.addrow:hover td { background:#fafbfc; }
 .grid td.unit .plus { margin-left:8px; border:1px solid var(--line); background:var(--card); color:var(--accent); border-radius:6px; width:24px; height:24px; line-height:1; font-size:16px; font-weight:700; cursor:pointer; vertical-align:middle; }
 .grid td.unit .plus:hover { background:var(--bg); }
+
+/* Single Cone: per-unit place tables */
+.unitcard { padding:12px 16px 16px; }
+.unitcard > summary { cursor:pointer; font-size:16px; padding:2px 0 10px; }
+.unitcard[open] > summary { margin-bottom:2px; }

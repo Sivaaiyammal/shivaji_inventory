@@ -275,6 +275,42 @@ function PlacesCalc({ title, places, value, fields = [['bags', 'Bags'], ['cones'
   );
 }
 
+// Single Cone: one table per unit with places (rows = counts, columns = the unit's places, bags / loose each).
+// Typing here fills the unit's column in the summary table above.
+function UnitPlacesTable({ unit, places, counts, cells, setPlace }) {
+  const val = (c, p, f) => cells[`${unit.code}|${c}`]?.places?.[p]?.[f] ?? '';
+  const sum = (cs, ps) => {
+    let bags = 0, cones = 0;
+    cs.forEach(c => ps.forEach(p => { bags += num(val(c, p, 'bags')); cones += num(val(c, p, 'cones')); }));
+    return { bags, cones };
+  };
+  const Pair = ({ t }) => <span className="pair"><b>{t.bags}</b><b>{t.cones}</b></span>;
+  const sub = <span className="pair sub"><span>bags</span><span>loose</span></span>;
+  return (
+    <details className="card unitcard" open>
+      <summary><b>{unit.name}</b> <span className="mute">by place</span></summary>
+      <div className="grid-wrap">
+        <table className="grid">
+          <thead><tr><th>Count</th>{places.map(p => <th key={p}>{p}{sub}</th>)}<th className="tot">{unit.name} total{sub}</th></tr></thead>
+          <tbody>
+            {counts.map(c => (
+              <tr key={c}><td>{c}</td>
+                {places.map(p => (
+                  <td key={p}>
+                    <input type="number" min="0" placeholder="bags" value={val(c, p, 'bags')} onChange={e => setPlace(unit.code, c, p, 'bags', e.target.value)} style={{ width: 62 }} />{' '}
+                    <input type="number" min="0" placeholder="cones" value={val(c, p, 'cones')} onChange={e => setPlace(unit.code, c, p, 'cones', e.target.value)} style={{ width: 62 }} />
+                  </td>
+                ))}
+                <td className="tot"><Pair t={sum([c], places)} /></td></tr>
+            ))}
+          </tbody>
+          <tfoot><tr><td>TOTAL</td>{places.map(p => <td key={p}><Pair t={sum(counts, [p])} /></td>)}<td className="tot"><Pair t={sum(counts, places)} /></td></tr></tfoot>
+        </table>
+      </div>
+    </details>
+  );
+}
+
 function Single({ date, masters, setMasters }) {
   const [cells, setCells] = useState({}); // "unit|count" -> {bags, loose_cones}
   const [msg, setMsg] = useState('');
@@ -323,9 +359,14 @@ function Single({ date, masters, setMasters }) {
   }, [date]);
   // typing straight into an input drops the per-place figures, since they would no longer add up to it
   const upd = (u, c, field, v) => setCells({ ...cells, [key(u, c)]: { ...cells[key(u, c)], [field]: v, places: {} } });
-  // places calculator: totals go into the cell, per-place figures are kept
-  const setPlaces = (u, c, bags, cones, places) => setCells({ ...cells, [key(u, c)]: { ...cells[key(u, c)], bags: bags || '', loose_cones: cones || '', places } });
   const placesOf = unit => (masters.places || []).filter(p => p.group === unit).map(p => p.name);
+  // a figure typed in a unit's place table: the unit's cell in the summary becomes the sum of its places
+  const setPlace = (u, c, place, field, v) => {
+    const cur = cells[key(u, c)] || {};
+    const places = { ...cur.places, [place]: { ...cur.places?.[place], [field]: v } };
+    const sum = f => placesOf(u).reduce((s, p) => s + num(places[p]?.[f]), 0);
+    setCells({ ...cells, [key(u, c)]: { ...cur, places, bags: sum('bags') || '', loose_cones: sum('cones') || '' } });
+  };
   const per = 40;
   // sum a set of cells: bags and loose cones are totalled separately; `all` = bags + loose cones converted at 40 per bag
   const sumCells = pairs => {
@@ -342,30 +383,38 @@ function Single({ date, masters, setMasters }) {
       const x = cells[key(u.code, c)];
       if (x) list.push({ unit: u.code, count: c, bags: num(x.bags), loose_cones: num(x.loose_cones), places: x.places || {} });
     }));
-    await api('/api/single-cone', { method: 'PUT', body: { date, cells: list, ...(withActual && { actuals, units }) } });
+    await api('/api/single-cone', { method: 'PUT', body: { date, cells: list } });
     setMsg('Saved');
   };
   return (
+    <>
     <div className="card">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h2>Single cone stock — {date}</h2>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <span className="mute">{msg}</span><button type="button" className="btn primary" onClick={save}>Save</button>
         <div className="menu-wrap">
           <button type="button" className="btn" onClick={() => openMenu('units')}>+ Column</button>
           {picker('units', 'unit', '/api/units', 'name', 'X Unit')}
         </div>
+        </div>
       </div>
-      <p className="mute">Enter bags and loose cones per unit. {per} loose cones = 1 bag (counted in totals automatically).</p>
+      <p className="mute">Enter bags and loose cones per unit. Units with places are filled in their own table below and totalled here. {per} loose cones = 1 bag (counted in totals automatically).</p>
       <div className="grid-wrap"><table className="grid">
         <thead><tr><th>Count</th>{masters.units.map(u => <th key={u.code}>{u.name} <button className="x" title="Remove column" onClick={() => removeItem('units', u.code, u.name)}>✕</button><span className="pair sub"><span>bags</span><span>loose</span></span></th>)}<th className="tot">Total<span className="pair sub"><span>bags</span><span>loose</span></span></th></tr></thead>
         <tbody>
           {masters.counts.map(c => (
             <tr key={c}><td>{c} <button className="x" title="Remove row" onClick={() => removeItem('counts', c, c)}>✕</button></td>
               {masters.units.map(u => (
-                <td key={u.code}>
-                  <input type="number" min="0" placeholder="bags" value={cells[key(u.code, c)]?.bags ?? ''} onChange={e => upd(u.code, c, 'bags', e.target.value)} style={{ width: 62 }} />{' '}
-                  <input type="number" min="0" placeholder="cones" value={cells[key(u.code, c)]?.loose_cones ?? ''} onChange={e => upd(u.code, c, 'loose_cones', e.target.value)} style={{ width: 62 }} />
-                  <PlacesCalc title={u.name + ' · ' + c} places={placesOf(u.code)} value={cells[key(u.code, c)]?.places} onApply={(t, p) => setPlaces(u.code, c, t.bags, t.cones, p)} />
-                </td>
+                placesOf(u.code).length ? (
+                  // a unit with places is filled in its own table below; this cell is their total
+                  <td key={u.code} title={'Total of ' + u.name + ' places (enter them in the ' + u.name + ' table below)'}><Pair t={sumCells([[u.code, c]])} /></td>
+                ) : (
+                  <td key={u.code}>
+                    <input type="number" min="0" placeholder="bags" value={cells[key(u.code, c)]?.bags ?? ''} onChange={e => upd(u.code, c, 'bags', e.target.value)} style={{ width: 62 }} />{' '}
+                    <input type="number" min="0" placeholder="cones" value={cells[key(u.code, c)]?.loose_cones ?? ''} onChange={e => upd(u.code, c, 'loose_cones', e.target.value)} style={{ width: 62 }} />
+                  </td>
+                )
               ))}
               <td className="tot">{(() => { const t = sumCells(masters.units.map(u => [u.code, c])); return <><Pair t={t} /><div className="eq">= <Overall t={t} /></div></>; })()}</td></tr>
           ))}
@@ -380,8 +429,14 @@ function Single({ date, masters, setMasters }) {
         <button type="button" className="btn" onClick={() => openMenu('counts')}>+ Row</button>
         {picker('counts', 'count', '/api/counts', 'code', '30S')}
       </div>
-      <p><button className="btn primary" onClick={save}>Save</button> <span className="mute">{msg}</span></p>
     </div>
+
+    {masters.units.filter(u => placesOf(u.code).length).map(u => (
+      <UnitPlacesTable key={u.code} unit={u} places={placesOf(u.code)} counts={masters.counts} cells={cells} setPlace={setPlace} />
+    ))}
+
+    <p><button className="btn primary" onClick={save}>Save</button> <span className="mute">{msg}</span></p>
+    </>
   );
 }
 
@@ -610,7 +665,7 @@ function BrandGrid({ kind, title, date, withActual }) {
     cols.forEach(b => rows.forEach(r => {
       if (cells[key(b, r)] !== undefined) list.push({ brand: b, count: r, qty: num(cells[key(b, r)]), ...(cellPlaces[key(b, r)] && { places: Object.fromEntries(Object.entries(cellPlaces[key(b, r)]).map(([p, v]) => [p, num(v.qty)])) }) });
     }));
-    await api(`/api/brand-stock/${kind}`, { method: 'PUT', body: { date, cells: list } });
+    await api(`/api/brand-stock/${kind}`, { method: 'PUT', body: { date, cells: list, ...(withActual && { actuals, units }) } });
     setMsg('Saved');
   };
   const row = (r, g, idx) => (
