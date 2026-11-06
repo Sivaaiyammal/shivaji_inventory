@@ -526,8 +526,8 @@ function Single({ date, masters, setMasters }) {
 function Master({ setMasters }) {
   const [sec, setSecState] = useState(() => hashParts()[1] || 'units');
   const setSec = k => { setSecState(k); location.hash = '/master/' + k; };
-  const [all, setAll] = useState({ units: [], places: [], counts: [], parties: [], brands: [], ranges: [], qualities: [] });
-  const [f, setF] = useState({ code: '', name: '', group: '' });
+  const [all, setAll] = useState({ units: [], places: [], counts: [], parties: [], brands: [], ranges: [], qualities: [], customers: [], plies: [] });
+  const [f, setF] = useState({ code: '', name: '', group: '', ply: '' });
   const [err, setErr] = useState('');
   const enc = encodeURIComponent;
   const load = useCallback(() => api('/api/masters/all').then(setAll), []);
@@ -545,6 +545,8 @@ function Master({ setMasters }) {
     parties: { title: 'Companies / parties', hint: 'Parties used in Cone Winding.', list: all.parties, id: p => p.name, label: () => '' },
     brands: { title: 'Brands', hint: 'Brand names, used as columns in Chippam and Cone Bags.', list: all.brands, id: b => b.name, label: () => '' },
     opening: { title: 'Opening balances', list: [], id: () => '', label: () => '' },
+    customers: { title: 'Doubling customers', hint: 'Companies you give yarn to for doubling; they appear in the Doubling tab.', list: all.customers, id: p => p.name, label: () => '' },
+    plies: { title: 'Plies', hint: 'Ply options for Doubling (2 = 2 ply, 3 = 3 ply, ...).', list: all.plies, id: p => p.name, label: () => '', show: p => p.name + ' ply' },
     qualities: { title: 'Qualities', hint: 'Bale qualities (1st, 2nd, …). Each is a column in the Bale Stock table and an option when entering bales.', list: all.qualities, id: q => q.id, label: () => '', show: q => q.name },
     ranges: { title: 'Count ranges', hint: 'Count ranges such as 3/56 - 3/62, used as rows in Chippam and Cone Bags.', list: all.ranges, id: r => r.name, label: () => '' },
   };
@@ -552,14 +554,15 @@ function Master({ setMasters }) {
   const shown = it => (S.show ? S.show(it) : S.id(it));
   const groups = all.units.filter(u => u.active); // group dropdown options
   const unitName = code => all.units.find(u => u.code === code)?.name || code;
-  const switchSec = k => { setSec(k); setF({ code: '', name: '', group: '' }); setErr(''); };
+  const switchSec = k => { setSec(k); setF({ code: '', name: '', group: '', ply: '' }); setErr(''); };
   const add = async e => {
     e.preventDefault();
     const [url, body] = sec === 'units' ? ['/api/units', { code: f.code, name: f.name }]
       : sec === 'places' ? ['/api/places', { name: f.name, group: f.group || groups[0]?.code }]
+      : sec === 'customers' ? ['/api/customers', { name: f.name, ply: f.ply }]
       : sec === 'counts' ? ['/api/counts', { code: f.name }]
       : sec === 'ranges' ? ['/api/ranges', { name: f.name.trim() }] : [`/api/${sec}`, { name: f.name }];
-    if (await run(url, 'POST', body)) setF({ code: '', name: '', group: f.group });
+    if (await run(url, 'POST', body)) setF({ code: '', name: '', group: f.group, ply: f.ply });
   };
   const rename = it => {
     const v = (window.prompt('Rename', sec === 'units' || sec === 'qualities' ? shown(it) : S.id(it)) || '').trim();
@@ -588,17 +591,24 @@ function Master({ setMasters }) {
               <label>Group<select value={f.group || groups[0]?.code || ''} onChange={e => setF({ ...f, group: e.target.value })} required>
                 {groups.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></label>
             </>
+          ) : sec === 'customers' ? (
+            <>
+              <label>New customer<input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="Name" required /></label>
+              <label>Ply<select value={f.ply} onChange={e => setF({ ...f, ply: e.target.value })}><option value="">None</option>{all.plies.filter(p => p.active).map(p => <option key={p.name} value={p.name}>{p.name} ply</option>)}</select></label>
+            </>
           ) : (
-            <label>{'New ' + { units: 'unit', counts: 'count', parties: 'party', brands: 'brand', qualities: 'quality' }[sec]}
-              <input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder={sec === 'units' ? 'e.g. X Unit' : sec === 'counts' ? 'e.g. 30S' : 'Name'} required /></label>
+            <label>{'New ' + { units: 'unit', counts: 'count', parties: 'party', brands: 'brand', qualities: 'quality', customers: 'customer', plies: 'ply' }[sec]}
+              <input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder={sec === 'units' ? 'e.g. X Unit' : sec === 'counts' ? 'e.g. 30S' : sec === 'plies' ? 'e.g. 2' : 'Name'} required /></label>
           )}
-          <button className="btn primary">Add {{ units: 'unit', places: 'place', counts: 'count', parties: 'party', brands: 'brand', ranges: 'range', qualities: 'quality' }[sec]}</button>
+          <button className="btn primary">Add {{ units: 'unit', places: 'place', counts: 'count', parties: 'party', brands: 'brand', ranges: 'range', qualities: 'quality', customers: 'customer', plies: 'ply' }[sec]}</button>
         </form>
       </div>
       <div className="card list">
         {S.list.map(it => (
           <div key={S.id(it)} className={'row' + (it.active ? '' : ' off')}>
             <span className="name"><b>{shown(it)}</b> <span className="mute">{S.label(it)}</span>
+              {sec === 'customers' && <span className="mute"> · Ply: <select value={it.ply || ''} onChange={e => run(`/api/masters/customers/${enc(it.name)}`, 'PATCH', { ply: e.target.value })}>
+                <option value="">None</option>{all.plies.filter(p => p.active || p.name === it.ply).map(p => <option key={p.name} value={p.name}>{p.name} ply</option>)}</select></span>}
               {sec === 'places' && <span className="mute"> · Group: <select value={it.group} onChange={e => run(`/api/masters/places/${enc(it.name)}`, 'PATCH', { group: e.target.value })}>
                 {groups.some(u => u.code === it.group) || <option value={it.group}>{unitName(it.group)}</option>}
                 {groups.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></span>}
@@ -693,27 +703,28 @@ function BrandGrid({ kind, title, date, withActual }) {
   const key = (b, r) => `${b}|${r}`;
   const enc = encodeURIComponent;
   // keep = true: a layout change (new blank line) reloads the sheet but must not lose what is typed and not saved yet
-  const load = useCallback((keep = false) => {
-    api(`/api/brand-stock/${kind}?date=${date}`).then(d => {
+  // layout changes (renaming a line, removing a line / brand, adding a brand) are held here until Save
+  const [orig, setOrig] = useState({}); // line label -> label it has on the server ('' = a new line not saved yet)
+  const [delRows, setDelRows] = useState([]); // server lines to remove on Save
+  const [delCols, setDelCols] = useState([]); // server brands to remove on Save
+  const [newCols, setNewCols] = useState([]); // brands added here, created on Save
+  const [dirty, setDirty] = useState(false);
+  const originOf = l => (l in orig ? orig[l] : l);
+  const load = useCallback(() => {
+    return api(`/api/brand-stock/${kind}?date=${date}`).then(d => {
       const m = {};
       d.cells.forEach(c => { m[key(c.brand, c.count)] = c.qty || ''; });
       const cp = {};
       (d.places || []).forEach(p => { const k = key(p.brand, p.count); cp[k] = { ...cp[k], [p.place]: { qty: p.qty || '' } }; });
-      const lab = new Set(d.rows);
-      const merge = (srv, prev, ok) => (keep ? { ...srv, ...Object.fromEntries(Object.entries(prev).filter(([k]) => ok(k))) } : srv);
-      const inRows = k => lab.has(k) || [...lab].some(l => k.endsWith('|' + l));
-      setRows(d.rows); setUnits(d.units || {}); setCols(d.cols);
-      setActuals(p => merge(d.actuals || {}, p, k => lab.has(k) && p[k]));
-      setCells(p => merge(m, p, k => inRows(k) && p[k] !== undefined));
-      setCellPlaces(p => merge(cp, p, inRows));
+      setRows(d.rows); setUnits(d.units || {}); setCols(d.cols); setActuals(d.actuals || {}); setCells(m); setCellPlaces(cp);
+      setOrig({}); setDelRows([]); setDelCols([]); setNewCols([]); setDirty(false);
       setMsg(''); setLoaded(true);
     });
   }, [kind, date]);
   useEffect(() => { setLoaded(false); load(); }, [load]);
   useEffect(() => { if (withActual) api('/api/masters').then(m => { setRanges(m.ranges); setMast({ units: m.units, places: m.places || [] }); }); }, [withActual]);
-  const placesOf = label => mast.places.filter(p => p.group === units[label]).map(p => p.name);
-  // pick a different marketing count for a row: rename it on the server, then re-key what is typed but not saved yet
-  const changeMarketing = async (old, label) => {
+  // pick a different marking count for a line: re-key what is typed; the rename itself is saved with Save
+  const changeMarketing = (old, label) => {
     if (!label || label === old) return;
     const tk = (l, u = units[old]) => `${u}|${place}|${l}`;
     // that count already has a line in another place of this unit: show that line here instead of renaming the blank one
@@ -724,29 +735,41 @@ function BrandGrid({ kind, title, date, withActual }) {
       return;
     }
     if (isNew(old)) setTouched({ ...touched, [tk(label)]: 1 });
-    try { await api(`/api/brand-stock/${kind}/rows/${enc(old)}`, { method: 'PATCH', body: { label } }); }
-    catch (x) { return setMsg(x.message); }
     const rekey = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k.endsWith(`|${old}`) ? k.slice(0, -old.length) + label : k === old ? label : k, v]));
+    const { [old]: _gone, ...rest } = orig;
+    setOrig({ ...rest, [label]: originOf(old) });
     setRows(rows.map(x => (x === old ? label : x)));
     setCells(rekey(cells)); setActuals(rekey(actuals)); setUnits(rekey(units)); setCellPlaces(rekey(cellPlaces));
+    setDirty(true); setMsg('');
   };
   const [touched, setTouched] = useState({}); // lines picked in a place this session, kept visible while still empty
-  const isNew = label => label.startsWith('~new~'); // blank row from the Add button, no marketing count chosen yet
+  const isNew = label => label.startsWith('~new~'); // blank line, no marking count chosen yet
   const options = cur => [...new Set([...ranges, cur].filter(Boolean))];
   const openMenu = async type => {
     if (menu?.type === type) return setMenu(null);
     const m = await api('/api/masters');
     setMenu({ type, items: type === 'cols' ? m.brands.filter(b => !cols.includes(b)) : m.ranges.filter(x => !rows.includes(x)) });
   };
-  const addItem = async (type, name) => {
-    setMenu(null);
-    try { await api(`/api/brand-stock/${kind}/${type}`, { method: 'POST', body: type === 'cols' ? { name } : { label: name } }); load(); }
-    catch (x) { setMsg(x.message); }
+  const addItem = (type, name) => {
+    setMenu(null); setDirty(true); setMsg('');
+    if (type === 'cols') {
+      if (cols.includes(name)) return;
+      setCols([...cols, name]);
+      if (delCols.includes(name)) setDelCols(delCols.filter(x => x !== name)); else setNewCols([...newCols, name]);
+    } else if (!rows.includes(name)) { setRows([...rows, name]); setOrig({ ...orig, [name]: '' }); }
   };
-  const remove = async (type, name) => {
-    if (!window.confirm(`Remove ${name.startsWith('~new~') ? 'this row' : name} from this sheet?`)) return;
-    try { await api(`/api/brand-stock/${kind}/${type}/${enc(name)}`, { method: 'DELETE' }); load(true); }
-    catch (x) { setMsg(x.message); }
+  const remove = (type, name) => {
+    if (!window.confirm(`Remove ${name.startsWith('~new~') ? 'this row' : name} from this sheet? (applied when you click Save)`)) return;
+    setDirty(true); setMsg('');
+    if (type === 'cols') {
+      setCols(cols.filter(x => x !== name));
+      if (newCols.includes(name)) setNewCols(newCols.filter(x => x !== name)); else setDelCols([...delCols, name]);
+    } else {
+      const o = originOf(name);
+      setRows(rows.filter(x => x !== name));
+      if (o) setDelRows([...delRows, o]);
+      const { [name]: _gone, ...rest } = orig; setOrig(rest);
+    }
   };
   const picker = (type, noun) => menu?.type === type && (
     <div className={'menu' + (type === 'rows' ? ' up' : '')}>
@@ -767,8 +790,20 @@ function BrandGrid({ kind, title, date, withActual }) {
     cols.forEach(b => rows.forEach(r => {
       if (cells[key(b, r)] !== undefined) list.push({ brand: b, count: r, qty: num(cells[key(b, r)]), ...(cellPlaces[key(b, r)] && { places: Object.fromEntries(Object.entries(cellPlaces[key(b, r)]).map(([p, v]) => [p, num(v.qty)])) }) });
     }));
-    await api(`/api/brand-stock/${kind}`, { method: 'PUT', body: { date, cells: list, ...(withActual && { actuals, units }) } });
-    setMsg('Saved');
+    try {
+      const base = `/api/brand-stock/${kind}`;
+      for (const r of delRows) await api(`${base}/rows/${enc(r)}`, { method: 'DELETE' });
+      for (const b of delCols) await api(`${base}/cols/${enc(b)}`, { method: 'DELETE' });
+      for (const r of rows) {
+        if (isNew(r)) continue;
+        const o = originOf(r);
+        if (o === '') await api(`${base}/rows`, { method: 'POST', body: { label: r, unit: units[r] || '' } });
+        else if (o !== r) await api(`${base}/rows/${enc(o)}`, { method: 'PATCH', body: { label: r } });
+      }
+      for (const b of newCols) await api(`${base}/cols`, { method: 'POST', body: { name: b } });
+      await api(base, { method: 'PUT', body: { date, cells: list, ...(withActual && { actuals, units }) } });
+      await load(); setMsg('Saved');
+    } catch (x) { setMsg(x.message); }
   };
   const unitPlaces = code => mast.places.filter(p => p.group === code).map(p => p.name);
   // a figure typed for one place: the brand cell becomes the sum of the unit's places
@@ -810,21 +845,15 @@ function BrandGrid({ kind, title, date, withActual }) {
     const loose = rows.filter(r => !mast.units.some(u => u.code === units[r]));
     return loose.length ? [...g, { code: '', name: 'No unit', rows: loose }] : g;
   };
-  const addRowTo = async unit => {
-    try { await api(`/api/brand-stock/${kind}/rows`, { method: 'POST', body: { label: `~new~${Date.now()}-${unit}`, unit } }); load(true); }
-    catch (x) { setMsg(x.message); }
-  };
-  const tried = useRef(new Set());
+  // every unit always ends with a blank line (kept on the page only; it is saved once a marking count is chosen)
   useEffect(() => {
     if (!withActual || !loaded || !mast.units.length) return;
-    mast.units.forEach(u => {
-      if (rows.some(r => units[r] === u.code && isNew(r))) return;
-      const sig = kind + '|' + u.code + '|' + rows.join(',');
-      if (tried.current.has(sig)) return;
-      tried.current.add(sig);
-      addRowTo(u.code);
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    const miss = mast.units.filter(u => !rows.some(r => units[r] === u.code && isNew(r)));
+    if (!miss.length) return;
+    const ids = miss.map(u => '~new~L-' + u.code);
+    setRows(rs => [...rs, ...ids.filter(l => !rs.includes(l))]);
+    setUnits(us => ({ ...us, ...Object.fromEntries(miss.map((u, i) => [ids[i], u.code])) }));
+    setOrig(o => ({ ...o, ...Object.fromEntries(ids.map(l => [l, ''])) }));
   }, [rows, units, mast.units, loaded, withActual]);
   const unitTable = g => {
     const ps = unitPlaces(g.code);
@@ -845,7 +874,7 @@ function BrandGrid({ kind, title, date, withActual }) {
             <td className="tot"><b>{ps.length ? placeTotal(cols, g.rows, place) : total(cols, g.rows)}</b></td></tr></tfoot>
         </table>
       </div>
-      <p style={{ margin: '12px 0 0', display: 'flex', gap: 12, alignItems: 'center' }}><button type="button" className="btn primary" onClick={save}>Save</button> <span className="mute">{msg}</span></p>
+      <p style={{ margin: '12px 0 0', display: 'flex', gap: 12, alignItems: 'center' }}><button type="button" className="btn primary" onClick={save}>Save</button> <span className="mute">{dirty && !msg ? 'Line / brand changes are not saved yet. Click Save.' : msg}</span></p>
     </div>
     <div className="card">
       <h2>{g.name} summary</h2>
@@ -1008,7 +1037,6 @@ function Winding({ date, masters, setMasters }) {
 
 // Doubling: yarn is given to a company (e.g. 56s) and they bring back the doubled yarn (e.g. 2/56s).
 // Saved rows are one "given" row and one "received" row per count; this joins them back into lines.
-const PLIES = [2, 3, 4];
 function doublingLines(rows) {
   const out = {};
   rows.forEach(r => {
@@ -1025,16 +1053,19 @@ function doublingLines(rows) {
 function Doubling({ date, masters }) {
   const [party, setParty] = useState(() => { try { return sessionStorage.getItem('doublingParty') || ''; } catch { return ''; } });
   const [rows, setRows] = useState([]); // everything entered on this date
-  const [lines, setLines] = useState([]); // this company's lines: [{count, bags, ply, inBags}]
+  const [drafts, setDrafts] = useState({}); // company -> lines typed but not saved yet, so switching company keeps them
   const [msg, setMsg] = useState('');
-  const company = masters.parties.includes(party) ? party : (masters.parties[0] || '');
+  const custs = masters.customers || [];
+  const customers = custs.map(x => x.name);
+  const plies = (masters.plies || []).map(Number);
+  const company = customers.includes(party) ? party : (customers[0] || '');
   const load = useCallback(() => api(`/api/report?date=${date}`).then(r => setRows(r.doubling?.rows || [])), [date]);
   useEffect(() => { load(); }, [load]);
-  // lines come from what is saved for this company on this date
-  useEffect(() => {
-    setLines(doublingLines(rows.filter(r => r.party === company)).map(g => ({ count: g.count, bags: String(g.bags || ''), ply: g.ply, inBags: String(g.inBags || '') })));
-    setMsg('');
-  }, [rows, company]);
+  useEffect(() => { setDrafts({}); setMsg(''); }, [date]);
+  // lines: what is typed for this company, otherwise what is saved for it on this date: [{count, bags, ply, inBags}]
+  const saved = doublingLines(rows.filter(r => r.party === company)).map(g => ({ count: g.count, bags: String(g.bags || ''), ply: g.ply, inBags: String(g.inBags || '') }));
+  const lines = drafts[company] ?? saved;
+  const setLines = ls => { setMsg(''); setDrafts({ ...drafts, [company]: ls }); };
   const pick = p => { setParty(p); try { sessionStorage.setItem('doublingParty', p); } catch { /* ignore */ } };
   const counts = masters.counts;
   const used = lines.map(l => l.count);
@@ -1042,31 +1073,42 @@ function Doubling({ date, masters }) {
   const save = async () => {
     try {
       await api('/api/winding/day', { method: 'PUT', body: { date, kind: 'doubling', party: company, lines: lines.map(l => ({ count: l.count, bags: num(l.bags), ply: l.ply, inBags: num(l.inBags) })) } });
-      await load(); setMsg('Saved');
+      await load(); setDrafts(({ [company]: _, ...rest }) => rest); setMsg('Saved');
     } catch (x) { setMsg(x.message); }
   };
   const given = lines.reduce((s, l) => s + num(l.bags), 0);
   const got = lines.reduce((s, l) => s + num(l.inBags), 0);
-  const day = doublingLines(rows);
+  // the day list: every company's lines, with its unsaved lines in place of what is saved
+  const byCo = {};
+  rows.forEach(r => { byCo[r.party] = 1; });
+  Object.keys(drafts).forEach(p => { byCo[p] = 1; });
+  const day = Object.keys(byCo).flatMap(p => {
+    const sv = doublingLines(rows.filter(r => r.party === p)).map(x => ({ count: x.count, bags: String(x.bags || ''), ply: x.ply, inBags: String(x.inBags || '') }));
+    return (drafts[p] ?? sv).filter(l => num(l.bags) || num(l.inBags)).map(l => ({ party: p, count: l.count, bags: num(l.bags), ply: l.ply, inBags: num(l.inBags) }));
+  });
   // a count that is no longer in Master (older entry) stays selectable so it still shows
   const opts = cur => [...counts, ...(cur && !counts.includes(cur) ? [cur] : [])].map(c => <option key={c} value={c} disabled={c !== cur && used.includes(c)}>{c}</option>);
-  const removeDay = async g => { for (const id of g.ids) await api(`/api/winding/${id}`, { method: 'DELETE' }); load(); };
+  // removing an entry only takes it off the page; the company's Save writes the change
+  const removeDay = g => {
+    const cur = drafts[g.party] ?? doublingLines(rows.filter(r => r.party === g.party)).map(x => ({ count: x.count, bags: String(x.bags || ''), ply: x.ply, inBags: String(x.inBags || '') }));
+    setMsg(''); setDrafts({ ...drafts, [g.party]: cur.filter(l => l.count !== g.count) });
+  };
   return (
     <>
       <div className="card entrybar">
         <div className="bar">
           <label>Company
             <select value={company} onChange={e => pick(e.target.value)}>
-              {masters.parties.map(p => <option key={p} value={p}>{p}</option>)}
+              {customers.map(p => <option key={p} value={p}>{p}</option>)}
             </select>
           </label>
         </div>
-        <div className="strip"><b>{company || 'No company'} | {date}</b><span>{lines.filter(l => num(l.bags) || num(l.inBags)).length} lines entered</span><span>Given {given} bags</span><span>Received {got} bags</span></div>
+        <div className="strip"><b>{company || 'No customer (add one in Master)'} | {date}</b><span>{lines.filter(l => num(l.bags) || num(l.inBags)).length} lines entered</span><span>Given {given} bags</span><span>Received {got} bags</span></div>
       </div>
 
       <div className="card">
         <h2>{company} <span className="rep-sub">given count → doubled count received</span></h2>
-        <table className="rep entry">
+        <table className="rep" data-labelfirst="1">
           <thead><tr><th>Count given</th><th>Bags given</th><th>Ply</th><th>Count received</th><th>Bags received</th></tr></thead>
           <tbody>
             {lines.map((l, i) => (
@@ -1076,14 +1118,14 @@ function Doubling({ date, masters }) {
                   <> <button type="button" className="x" title="Remove this line" onClick={() => setLines(lines.filter((_, k) => k !== i))}>✕</button></>
                 </td>
                 <td><CalcInput placeholder="bags" width={90} value={l.bags} onChange={v => setLine(i, { bags: v })} /></td>
-                <td><select value={l.ply} onChange={e => setLine(i, { ply: +e.target.value })}>{PLIES.map(n => <option key={n} value={n}>{n} ply</option>)}</select></td>
+                <td><select value={l.ply} onChange={e => setLine(i, { ply: +e.target.value })}>{[...plies, ...(plies.includes(l.ply) ? [] : [l.ply])].map(n => <option key={n} value={n}>{n} ply</option>)}</select></td>
                 <td><b>{l.ply}/{l.count}</b></td>
                 <td><CalcInput placeholder="bags" width={90} value={l.inBags} onChange={v => setLine(i, { inBags: v })} /></td>
               </tr>
             ))}
             <tr>
               <td>
-                <select value="" onChange={e => e.target.value && setLines([...lines, { count: e.target.value, bags: '', ply: 2, inBags: '' }])}>
+                <select value="" onChange={e => e.target.value && setLines([...lines, { count: e.target.value, bags: '', ply: +custs.find(x => x.name === company)?.ply || plies[0] || 2, inBags: '' }])}>
                   <option value="">Select count…</option>{opts('')}
                 </select>
               </td>

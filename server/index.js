@@ -20,6 +20,8 @@ app.get('/api/masters', (_, res) => res.json({
   places: db.prepare('SELECT name, grp "group" FROM places WHERE active=1 ORDER BY name').all(),
   ranges: db.prepare('SELECT name FROM ranges WHERE active=1 ORDER BY name').all().map(r => r.name),
   qualities: db.prepare('SELECT id, name FROM qualities WHERE active=1 ORDER BY sort, id').all(),
+  customers: db.prepare('SELECT name, ply FROM customers WHERE active=1 ORDER BY name').all(),
+  plies: db.prepare('SELECT name FROM plies WHERE active=1 ORDER BY sort, CAST(name AS REAL)').all().map(p => p.name),
 }));
 // Everything incl. inactive, with an 'used' flag (saved entries exist) for the Master tab
 app.get('/api/masters/all', (_, res) => res.json({
@@ -34,6 +36,8 @@ app.get('/api/masters/all', (_, res) => res.json({
   places: db.prepare(`SELECT name, grp "group", active, 0 used FROM places ORDER BY name`).all(),
   ranges: db.prepare(`SELECT name, active, 0 used FROM ranges ORDER BY name`).all(),
   qualities: db.prepare(`SELECT id, name, active, (EXISTS(SELECT 1 FROM bale_moves b WHERE b.quality=qualities.id) OR EXISTS(SELECT 1 FROM opening_balances o WHERE o.quality=qualities.id)) used FROM qualities ORDER BY sort, id`).all(),
+  customers: db.prepare(`SELECT name, ply, active, EXISTS(SELECT 1 FROM winding w WHERE w.kind='doubling' AND w.party=customers.name) used FROM customers ORDER BY name`).all(),
+  plies: db.prepare(`SELECT name, active, EXISTS(SELECT 1 FROM winding w WHERE w.kind='doubling' AND w.note='received' AND w.count LIKE plies.name || '/%') used FROM plies ORDER BY sort, CAST(name AS REAL)`).all(),
 }));
 app.post('/api/parties', (req, res) => {
   const name = (req.body.name || '').trim();
@@ -43,18 +47,34 @@ app.post('/api/parties', (req, res) => {
 });
 
 // Rename / activate / deactivate master items (Master tab)
-const TABLES = { units: ['units', 'code'], counts: ['counts', 'code'], parties: ['parties', 'name'], brands: ['brands', 'name'], ranges: ['ranges', 'name'], places: ['places', 'name'], qualities: ['qualities', 'id'] };
+const TABLES = { units: ['units', 'code'], counts: ['counts', 'code'], parties: ['parties', 'name'], brands: ['brands', 'name'], ranges: ['ranges', 'name'], places: ['places', 'name'], qualities: ['qualities', 'id'], customers: ['customers', 'name'], plies: ['plies', 'name'] };
 app.patch('/api/masters/:kind/:key', (req, res) => {
   const [table, keyCol] = TABLES[req.params.kind] || [];
   if (!table) return res.status(404).json({ error: 'Unknown master' });
   const key = req.params.key;
-  const { active, name, group } = req.body;
+  const { active, name, group, ply } = req.body;
+  if (ply !== undefined && table === 'customers') {
+    const p = String(ply).trim();
+    if (p && !db.prepare('SELECT 1 FROM plies WHERE name=?').get(p)) return res.status(400).json({ error: 'Choose a ply from the Plies list' });
+    db.prepare('UPDATE customers SET ply=? WHERE name=?').run(p, key);
+  }
   if (group !== undefined && table === 'places') db.prepare('UPDATE places SET grp=? WHERE name=?').run(group, key);
   if (active !== undefined) db.prepare(`UPDATE ${table} SET active=? WHERE ${keyCol}=?`).run(active ? 1 : 0, key);
   if (name !== undefined) {
     const v = name.trim();
     if (!v) return res.status(400).json({ error: 'Name required' });
     if (table === 'units') db.prepare('UPDATE units SET name=? WHERE code=?').run(v, key);
+    else if (table === 'customers' || table === 'plies') {
+      if (v !== key && db.prepare(`SELECT 1 FROM ${table} WHERE name=?`).get(v)) return res.status(409).json({ error: `${v} already exists` });
+      if (table === 'plies' && !(+v > 0 && /^\d+$/.test(v))) return res.status(400).json({ error: 'Ply must be a whole number, e.g. 2' });
+      db.exec('BEGIN');
+      try {
+        db.prepare(`UPDATE ${table} SET name=? WHERE name=?`).run(v, key);
+        if (table === 'customers') db.prepare("UPDATE winding SET party=? WHERE party=? AND kind='doubling'").run(v, key);
+        else db.prepare("UPDATE winding SET count=? || substr(count, length(?)+1) WHERE kind='doubling' AND note='received' AND count LIKE ? || '/%'").run(v, key, key);
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); return res.status(500).json({ error: e.message }); }
+    }
     else if (table === 'qualities') {
       if (db.prepare('SELECT 1 FROM qualities WHERE name=? AND id<>?').get(v, key)) return res.status(409).json({ error: `${v} already exists` });
       db.prepare('UPDATE qualities SET name=? WHERE id=?').run(v, key);
@@ -122,6 +142,35 @@ app.delete('/api/qualities/:id', (req, res) => {
   const n = db.prepare('SELECT (SELECT COUNT(*) FROM bale_moves WHERE quality=?) + (SELECT COUNT(*) FROM opening_balances WHERE quality=?) n').get(id, id).n;
   if (inUse(res, n, 'this quality')) return;
   db.prepare('DELETE FROM qualities WHERE id=?').run(id);
+  res.json({ ok: true });
+});
+app.post('/api/customers', (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Customer name required' });
+  if (db.prepare('SELECT 1 FROM customers WHERE name=?').get(name)) return res.status(409).json({ error: name + ' already exists' });
+  const ply = String(req.body.ply ?? '').trim();
+  if (ply && !db.prepare('SELECT 1 FROM plies WHERE name=?').get(ply)) return res.status(400).json({ error: 'Choose a ply from the Plies list' });
+  db.prepare('INSERT INTO customers (name,ply) VALUES (?,?)').run(name, ply);
+  res.json({ ok: true });
+});
+app.delete('/api/customers/:name', (req, res) => {
+  const n = db.prepare("SELECT COUNT(*) n FROM winding WHERE kind='doubling' AND party=?").get(req.params.name).n;
+  if (inUse(res, n, 'this customer')) return;
+  db.prepare('DELETE FROM customers WHERE name=?').run(req.params.name);
+  res.json({ ok: true });
+});
+app.post('/api/plies', (req, res) => {
+  const name = String(req.body.name ?? '').trim();
+  if (!/^\d+$/.test(name) || !(+name > 0)) return res.status(400).json({ error: 'Ply must be a whole number, e.g. 2' });
+  const v = String(+name);
+  if (db.prepare('SELECT 1 FROM plies WHERE name=?').get(v)) return res.status(409).json({ error: v + ' ply already exists' });
+  db.prepare('INSERT INTO plies (name,sort) VALUES (?,?)').run(v, +v);
+  res.json({ ok: true });
+});
+app.delete('/api/plies/:name', (req, res) => {
+  const n = db.prepare("SELECT COUNT(*) n FROM winding WHERE kind='doubling' AND note='received' AND count LIKE ? || '/%'").get(req.params.name).n;
+  if (inUse(res, n, 'this ply')) return;
+  db.prepare('DELETE FROM plies WHERE name=?').run(req.params.name);
   res.json({ ok: true });
 });
 app.post('/api/brands', (req, res) => {
@@ -373,7 +422,7 @@ app.put('/api/winding/day', (req, res) => {
       const count = String(l.count || '').trim();
       if (!count || seen.has(count)) continue;
       seen.add(count);
-      const given = +l.bags, got = +l.inBags, ply = [2, 3, 4].includes(+l.ply) ? +l.ply : 2;
+      const given = +l.bags, got = +l.inBags, ply = Number.isInteger(+l.ply) && +l.ply > 0 ? +l.ply : 2;
       // Doubling: given = the count handed over, received = the doubled count (e.g. 2/56S) that comes back
       if (kind === 'doubling') {
         if (given > 0) ins.run(date, party, count, given, 'given', kind);

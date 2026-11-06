@@ -97,6 +97,17 @@ for (const [t, ddl] of [
   } catch (e) { db.exec('ROLLBACK'); throw e; }
 }
 
+// Doubling has its own customers and plies (Master). Customers start as the companies already used in Doubling entries.
+db.exec('CREATE TABLE IF NOT EXISTS customers (name TEXT PRIMARY KEY, active INTEGER NOT NULL DEFAULT 1)');
+db.exec('CREATE TABLE IF NOT EXISTS plies (name TEXT PRIMARY KEY, sort INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1)');
+// each customer has a ply that is filled in when it is picked in Doubling
+if (!db.prepare('PRAGMA table_info(customers)').all().some(c => c.name === 'ply'))
+  db.exec("ALTER TABLE customers ADD COLUMN ply TEXT NOT NULL DEFAULT ''");
+if (!db.prepare('SELECT COUNT(*) n FROM customers').get().n)
+  db.exec("INSERT OR IGNORE INTO customers (name) SELECT DISTINCT party FROM winding WHERE kind='doubling'");
+if (!db.prepare('SELECT COUNT(*) n FROM plies').get().n)
+  db.exec("INSERT INTO plies (name,sort) VALUES ('2',2),('3',3),('4',4)");
+
 if (!db.prepare('SELECT COUNT(*) n FROM units').get().n) {
   const u = db.prepare('INSERT INTO units (code,name,sort,has_bales) VALUES (?,?,?,?)');
   [['A', 'A Unit', 1, 1], ['S', 'S Unit', 2, 1], ['D', 'D Unit', 3, 1], ['K', 'K Unit', 4, 0], ['MALINI', 'Malini', 5, 0]]
