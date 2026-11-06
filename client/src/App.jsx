@@ -298,12 +298,18 @@ function CalcInput({ value, onChange, placeholder, disabled }) {
 // Typing here fills the unit's column in the summary table above.
 function UnitPlacesTable({ unit, places: realPlaces, counts, cells, setPlace, setDirect }) {
   // a unit without places gets one plain column (null) that holds its bags / cones directly
-  const places = realPlaces.length ? realPlaces : [null];
+  const allPlaces = realPlaces.length ? realPlaces : [null];
   const val = (c, p, f) => {
     const x = cells[`${unit.code}|${c}`];
     return p === null ? (x?.[f === 'bags' ? 'bags' : 'loose_cones'] ?? '') : (x?.places?.[p]?.[f] ?? '');
   };
   const put = (c, p, f, v) => p === null ? setDirect(unit.code, c, f === 'bags' ? 'bags' : 'loose_cones', v) : setPlace(unit.code, c, p, f, v);
+  // columns work like rows: only the places picked from the dropdown (or already holding figures) are shown
+  const [addedP, setAddedP] = useState([]);
+  const placeHasData = p => counts.some(c => num(val(c, p, 'bags')) || num(val(c, p, 'cones')));
+  const places = realPlaces.length ? realPlaces.filter(p => addedP.includes(p) || placeHasData(p)) : [null];
+  const freeP = realPlaces.filter(p => !places.includes(p));
+  const blankCol = realPlaces.length > 0 && freeP.length > 0;
   const sum = (cs, ps) => {
     let bags = 0, cones = 0;
     cs.forEach(c => ps.forEach(p => { bags += num(val(c, p, 'bags')); cones += num(val(c, p, 'cones')); }));
@@ -314,7 +320,7 @@ function UnitPlacesTable({ unit, places: realPlaces, counts, cells, setPlace, se
   const Eq = ({ t }) => { const extra = Math.floor(t.cones / 40), left = t.cones % 40; return <span className="eq" style={{ whiteSpace: 'nowrap' }}>= <b>{t.bags + extra}</b>{t.cones > 0 && <span className="loose"> (Loose cone bag = {extra})</span>}</span>; };
   const sub = <span className="pair sub"><span>bags</span><span>loose</span></span>;
   // only the counts picked from the dropdown (or already holding figures) are rows
-  const hasData = c => places.some(p => num(val(c, p, 'bags')) || num(val(c, p, 'cones')));
+  const hasData = c => allPlaces.some(p => num(val(c, p, 'bags')) || num(val(c, p, 'cones')));
   const [added, setAdded] = useState([]);
   const shown = counts.filter(c => added.includes(c) || hasData(c));
   const free = counts.filter(c => !shown.includes(c));
@@ -323,7 +329,7 @@ function UnitPlacesTable({ unit, places: realPlaces, counts, cells, setPlace, se
       <summary><b>{unit.name}</b>{realPlaces.length > 0 && <span className="mute"> by place</span>}</summary>
       <div className="grid-wrap">
         <table className="grid">
-          <thead><tr><th>Count</th>{places.map(p => <th key={p ?? 'qty'}>{p ?? 'Stock'}{sub}</th>)}<th className="tot">{unit.name} total{sub}</th></tr></thead>
+          <thead><tr><th>Count</th>{places.map(p => <th key={p ?? 'qty'}>{p === null ? 'Stock' : <select value={p} disabled={placeHasData(p)} onChange={e => setAddedP(addedP.map(x => x === p ? e.target.value : x))}>{realPlaces.map(o => <option key={o} value={o} disabled={o !== p && places.includes(o)}>{o}</option>)}</select>}{p !== null && !placeHasData(p) && <> <button type="button" className="x" title="Remove column" onClick={() => setAddedP(addedP.filter(x => x !== p))}>✕</button></>}{sub}</th>)}{blankCol && <th><select value="" onChange={e => e.target.value && setAddedP([...addedP, e.target.value])}><option value="">Select place…</option>{realPlaces.map(o => <option key={o} value={o} disabled={places.includes(o)}>{o}</option>)}</select>{sub}</th>}<th className="tot">{unit.name} total{sub}</th></tr></thead>
           <tbody>
             {shown.map(c => (
               <tr key={c}><td>
@@ -337,6 +343,7 @@ function UnitPlacesTable({ unit, places: realPlaces, counts, cells, setPlace, se
                     <CalcInput placeholder="cones" value={val(c, p, 'cones')} onChange={v => put(c, p, 'cones', v)} />
                   </td>
                 ))}
+                {blankCol && <td><input type="number" disabled placeholder="bags" style={{ width: 62 }} /> <input type="number" disabled placeholder="cones" style={{ width: 62 }} /></td>}
                 <td className="tot"><Pair t={sum([c], places)} /><div><Eq t={sum([c], places)} /></div></td></tr>
             ))}
             {free.length > 0 && (
@@ -353,10 +360,11 @@ function UnitPlacesTable({ unit, places: realPlaces, counts, cells, setPlace, se
                     <input type="number" disabled placeholder="cones" style={{ width: 62 }} />
                   </td>
                 ))}
+                {blankCol && <td><input type="number" disabled placeholder="bags" style={{ width: 62 }} /> <input type="number" disabled placeholder="cones" style={{ width: 62 }} /></td>}
                 <td className="tot"><Pair t={{ bags: 0, cones: 0 }} /></td></tr>
             )}
           </tbody>
-          <tfoot><tr><td>TOTAL</td>{places.map(p => <td key={p ?? 'qty'}><Pair t={sum(counts, [p])} /><div><Eq t={sum(counts, [p])} /></div></td>)}<td className="tot"><Pair t={sum(counts, places)} /><div><Eq t={sum(counts, places)} /></div></td></tr></tfoot>
+          <tfoot><tr><td>TOTAL</td>{places.map(p => <td key={p ?? 'qty'}><Pair t={sum(counts, [p])} /><div><Eq t={sum(counts, [p])} /></div></td>)}{blankCol && <td />}<td className="tot"><Pair t={sum(counts, places)} /><div><Eq t={sum(counts, places)} /></div></td></tr></tfoot>
         </table>
       </div>
     </details>
@@ -863,37 +871,124 @@ function Winding({ date, masters, setMasters }) {
   );
 }
 
+// bags + loose cones (40 per bag) as the sheet writes it, e.g. 10 bags + 60 cones = 11 (Loose cone bag = 1)
+const coneEq = (bags, cones) => {
+  const extra = Math.floor(cones / 40);
+  return <span className="eq" style={{ whiteSpace: 'nowrap' }}>= <b>{bags + extra}</b>{cones > 0 && <span className="loose"> (Loose cone bag = {extra})</span>}</span>;
+};
+const dash = n => (n ? n : '–');
+
 function Report({ date }) {
-  const [r, setR] = useState(null);
-  useEffect(() => { api(`/api/report?date=${date}`).then(setR); }, [date]);
-  if (!r) return 'Loading…';
-  const sc = r.singleCone;
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+  const [which, setWhich] = useState(() => { try { return sessionStorage.getItem('reportWhich') || 'all'; } catch { return 'all'; } });
+  const pick = k => { setWhich(k); try { sessionStorage.setItem('reportWhich', k); } catch { /* ignore */ } };
+  useEffect(() => {
+    setD(null); setErr('');
+    Promise.all([
+      api(`/api/bale-stock?date=${date}`), api(`/api/single-cone?date=${date}`),
+      api(`/api/brand-stock/chippam?date=${date}`), api(`/api/brand-stock/conebags?date=${date}`),
+      api(`/api/report?date=${date}`), api('/api/masters'),
+    ]).then(([bales, sc, chippam, conebags, rep, m]) => setD({ bales, sc, chippam, conebags, winding: rep.winding, m }))
+      .catch(x => setErr(x.message));
+  }, [date]);
+  if (err) return <div className="err">{err}</div>;
+  if (!d) return 'Loading…';
+  const { m } = d;
+  const pretty = new Date(date + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
+
+  // Single cone: one table per unit, only the counts that have stock
+  const singleUnit = u => {
+    const places = m.places.filter(p => p.group === u.code).map(p => p.name);
+    const cols = places.length ? places : [null];
+    const get = (c, p) => {
+      if (p === null) { const x = d.sc.cells.find(r => r.unit === u.code && r.count === c); return { bags: x?.bags || 0, cones: x?.loose_cones || 0 }; }
+      const x = d.sc.places.find(r => r.unit === u.code && r.count === c && r.place === p); return { bags: x?.bags || 0, cones: x?.cones || 0 };
+    };
+    const sum = (cs, ps) => cs.reduce((t, c) => ps.reduce((a, p) => { const g = get(c, p); return { bags: a.bags + g.bags, cones: a.cones + g.cones }; }, t), { bags: 0, cones: 0 });
+    const counts = m.counts.filter(c => { const t = sum([c], cols); return t.bags || t.cones; });
+    if (!counts.length) return null;
+    const Pair = ({ t }) => <span className="pair"><b>{t.bags}</b><b>{t.cones}</b></span>;
+    const sub = <span className="pair sub"><span>bags</span><span>loose</span></span>;
+    return (
+      <div key={u.code} className="rep-block">
+        <h3>{u.name}</h3>
+        <table className="rep">
+          <thead><tr><th>Count</th>{places.length ? places.map(p => <th key={p}>{p}{sub}</th>) : null}<th className="tot">Total{sub}</th></tr></thead>
+          <tbody>{counts.map(c => { const t = sum([c], cols); return (
+            <tr key={c}><td>{c}</td>{places.length ? places.map(p => { const g = get(c, p); return <td key={p}>{g.bags || g.cones ? <Pair t={g} /> : '–'}</td>; }) : null}
+              <td className="tot"><Pair t={t} /><div>{coneEq(t.bags, t.cones)}</div></td></tr>
+          ); })}</tbody>
+          <tfoot><tr><td>TOTAL</td>{places.length ? places.map(p => { const t = sum(counts, [p]); return <td key={p}><Pair t={t} /><div>{coneEq(t.bags, t.cones)}</div></td>; }) : null}
+            <td className="tot">{(() => { const t = sum(counts, cols); return <><Pair t={t} /><div>{coneEq(t.bags, t.cones)}</div></>; })()}</td></tr></tfoot>
+        </table>
+      </div>
+    );
+  };
+  const scUnits = m.units.map(singleUnit).filter(Boolean);
+  const scAll = d.sc.cells.reduce((a, r) => ({ bags: a.bags + r.bags, cones: a.cones + r.loose_cones }), { bags: 0, cones: 0 });
+
+  // Chippam / Cone Bags: per unit, rows (actual + marketing count) that have a quantity, brands as columns
+  const brandSheet = (sheet, title) => {
+    const qty = (b, r) => sheet.cells.find(c => c.brand === b && c.count === r)?.qty || 0;
+    const blocks = m.units.map(u => {
+      const rows = sheet.rows.filter(r => sheet.units[r] === u.code && !r.startsWith('~new~') && sheet.cols.some(b => qty(b, r)));
+      if (!rows.length) return null;
+      const rowTotal = r => sheet.cols.reduce((s, b) => s + qty(b, r), 0);
+      return (
+        <div key={u.code} className="rep-block">
+          <h3>{u.name}</h3>
+          <table className="rep">
+            <thead><tr><th>Actual count</th><th>Marketing</th>{sheet.cols.map(b => <th key={b}>{b}</th>)}<th className="tot">Total</th></tr></thead>
+            <tbody>{rows.map(r => <tr key={r}><td>{sheet.actuals[r] || '–'}</td><td>{r}</td>{sheet.cols.map(b => <td key={b}>{dash(qty(b, r))}</td>)}<td className="tot"><b>{rowTotal(r)}</b></td></tr>)}</tbody>
+            <tfoot><tr><td>TOTAL</td><td />{sheet.cols.map(b => <td key={b}>{rows.reduce((s, r) => s + qty(b, r), 0)}</td>)}<td className="tot">{rows.reduce((s, r) => s + rowTotal(r), 0)}</td></tr></tfoot>
+          </table>
+        </div>
+      );
+    }).filter(Boolean);
+    const grand = sheet.cells.reduce((s, c) => s + (c.qty || 0), 0);
+    return (
+      <section className="card rep-sec">
+        <h2>{title}{blocks.length > 0 && <span className="rep-sum">Total {grand}</span>}</h2>
+        {blocks.length ? blocks : <p className="mute">No entries for this date.</p>}
+      </section>
+    );
+  };
+
+  const windTotal = d.winding.total;
+  const SHEETS = [['all', 'Combined report'], ['bale', 'Bale Stock'], ['single', 'Single Cone'], ['chippam', 'Chippam'], ['conebags', 'Cone Bags'], ['winding', 'Cone Winding']];
+  const show = k => which === 'all' || which === k;
+  const label = SHEETS.find(x => x[0] === which)[1];
   return (
     <>
-      <div className="noprint" style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        <button className="btn primary" onClick={() => window.print()}>Print</button>
-        <a className="btn" href={`/api/report.xlsx?date=${date}`}>Download Excel</a>
+      <div className="noprint" style={{ marginBottom: 16 }}>
+        <div className="subtabs">{SHEETS.map(([k, l]) => <button key={k} className={which === k ? 'on' : ''} onClick={() => pick(k)}>{l}</button>)}</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn primary" onClick={() => window.print()}>Print {which === 'all' ? 'combined report' : label}</button>
+          <a className="btn" href={`/api/report.xlsx?date=${date}${which === 'all' ? '' : '&sheet=' + which}`}>Download Excel</a>
+        </div>
       </div>
-      <div className="print-title">Shivaji Inventory — Daily Report {date}</div>
-      <div className="card"><h2>Bale stock</h2><BaleTable stock={r.bales} />
-        {r.mixing.length > 0 && <p className="mute">Mixing today: {r.mixing.map(m => `${m.unit} ${m.quality === 1 ? '1st' : '2nd'}: ${m.bales} bales`).join(' · ')}</p>}
+      <div className="print-title">
+        <div className="rep-title">Shivaji Inventory — {which === 'all' ? 'Daily Stock Report' : label}</div>
+        <div className="rep-date">{pretty}</div>
       </div>
-      <div className="card"><h2>Single cone stock (bags)</h2>
-        <table>
-          <thead><tr><th>Count</th>{sc.units.map(u => <th key={u.code}>{u.name}</th>)}<th>Total</th><th>Loose cones left</th></tr></thead>
-          <tbody>{sc.rows.map(x => (
-            <tr key={x.count}><td>{x.count}</td>{sc.units.map(u => <td key={u.code}>{x.perUnit[u.code].total || '–'}</td>)}<td><b>{x.total}</b></td><td>{x.looseLeft || '–'}</td></tr>
-          ))}</tbody>
-          <tfoot><tr><td>TOTAL</td>{sc.units.map(u => <td key={u.code}>{sc.unitTotals[u.code]}</td>)}<td>{sc.grand}</td><td /></tr></tfoot>
-        </table>
-      </div>
-      <div className="card"><h2>Cone winding</h2>
-        <table>
-          <thead><tr><th>Party</th><th>Count</th><th>Weight (kg)</th></tr></thead>
-          <tbody>{r.winding.rows.map(x => <tr key={x.id}><td>{x.party}</td><td>{x.count}</td><td>{fmt(x.weight_kg)}</td></tr>)}</tbody>
-          <tfoot><tr><td>TOTAL</td><td /><td>{fmt(r.winding.total)}</td></tr></tfoot>
-        </table>
-      </div>
+      {show('bale') && <section className="card rep-sec"><h2>Bale stock <span className="rep-sub">(bales)</span></h2><BaleStockTable rows={d.bales} /></section>}
+      {show('single') && <section className="card rep-sec">
+        <h2>Single cone stock{scUnits.length > 0 && <span className="rep-sum">All units {scAll.bags + Math.floor(scAll.cones / 40)} bags{scAll.cones % 40 ? ` + ${scAll.cones % 40} loose cones` : ''}</span>}</h2>
+        {scUnits.length ? scUnits : <p className="mute">No entries for this date.</p>}
+      </section>}
+      {show('chippam') && brandSheet(d.chippam, 'Chippam')}
+      {show('conebags') && brandSheet(d.conebags, 'Cone Bags')}
+      {show('winding') && <section className="card rep-sec"><h2>Cone winding</h2>
+        {d.winding.rows.length ? (
+          <table className="rep">
+            <thead><tr><th>Party</th><th>Count</th><th>Weight (kg)</th><th>Note</th></tr></thead>
+            <tbody>{d.winding.rows.map(x => <tr key={x.id}><td>{x.party}</td><td>{x.count}</td><td>{fmt(x.weight_kg)}</td><td style={{ textAlign: 'left' }}>{x.note}</td></tr>)}</tbody>
+            <tfoot><tr><td>TOTAL</td><td /><td>{fmt(windTotal)}</td><td /></tr></tfoot>
+          </table>
+        ) : <p className="mute">No entries for this date.</p>}
+      </section>}
+      <div className="rep-foot print-only">Printed from Shivaji Inventory</div>
     </>
   );
 }

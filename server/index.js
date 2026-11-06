@@ -2,8 +2,8 @@ import express from 'express';
 import ExcelJS from 'exceljs';
 import path from 'node:path';
 import fs from 'node:fs';
-import { db } from './db.js';
-import { daily } from './report.js';
+import { db, CONES_PER_BAG } from './db.js';
+import { daily, winding } from './report.js';
 import { mountAuth } from './auth.js';
 
 const app = express();
@@ -169,8 +169,7 @@ app.delete('/api/opening/:id', (req, res) => {
 // Daily bale stock per unit and quality. Opening is carried forward: it is the opening balance set in Master
 // plus everything received and issued BEFORE the selected date, i.e. the previous day's closing stock.
 // Received and issued are that day's entries; closing stock = opening + received - issued.
-app.get('/api/bale-stock', (req, res) => {
-  const date = D(req.query);
+function baleDaily(date) {
   const before = db.prepare(`SELECT unit, quality, SUM(CASE WHEN type='IN' THEN bales ELSE -bales END) net
     FROM bale_moves WHERE date < ? GROUP BY unit, quality`).all(date);
   const day = db.prepare(`SELECT unit, quality,
@@ -179,15 +178,16 @@ app.get('/api/bale-stock', (req, res) => {
   const opening = db.prepare('SELECT unit, quality, SUM(bales) bales FROM opening_balances WHERE date <= ? GROUP BY unit, quality').all(date);
   const units = db.prepare('SELECT code, name FROM units WHERE active=1 ORDER BY sort').all();
   const pick = (list, u, q, k) => list.find(r => r.unit === u && r.quality === q)?.[k] || 0;
-  res.json(units.map(u => {
+  return units.map(u => {
     const f = q => ({
       open: pick(opening, u.code, q, 'bales') + pick(before, u.code, q, 'net'),
       rec: pick(day, u.code, q, 'rec'),
       iss: pick(day, u.code, q, 'iss'),
     });
     return { unit: u.code, name: u.name, q1: f(1), q2: f(2) };
-  }));
-});
+  });
+}
+app.get('/api/bale-stock', (req, res) => res.json(baleDaily(D(req.query))));
 app.post('/api/bales', (req, res) => {
   const b = req.body;
   if (!['IN', 'MIX'].includes(b.type) || ![1, 2].includes(+b.quality) || !(+b.bales > 0))
@@ -341,36 +341,63 @@ app.delete('/api/winding/:id', (req, res) => {
 app.get('/api/report', (req, res) => res.json(daily(D(req.query))));
 
 app.get('/api/report.xlsx', async (req, res) => {
-  const r = daily(D(req.query));
+  const date = D(req.query);
   const wb = new ExcelJS.Workbook();
+  const bold = r => { r.font = { bold: true }; return r; };
+  const head = (ws, title, cols) => { bold(ws.addRow([title])); bold(ws.addRow(cols)); };
+  const units = db.prepare('SELECT code, name FROM units WHERE active=1 ORDER BY sort').all();
+  const unitName = c => units.find(u => u.code === c)?.name || c;
 
+  // Bale stock: opening / received / issued / stock for each quality
   let ws = wb.addWorksheet('Bale Stock');
-  ws.addRow([`Bale stock as on ${r.date}`]).font = { bold: true };
-  ws.addRow(['Unit', '1st Qty bales', '1st Qty kg', '2nd Qty bales', '2nd Qty kg', 'Total bales', 'Total kg']).font = { bold: true };
-  const flat = b => [b.q1.bales, b.q1.weight_kg, b.q2.bales, b.q2.weight_kg, b.bales, b.weight_kg];
-  r.bales.forEach(b => ws.addRow([b.unit, ...flat(b)]));
-  ws.addRow(['TOTAL', ...[0, 1, 2, 3, 4, 5].map(i => r.bales.reduce((s, b) => s + flat(b)[i], 0))]).font = { bold: true };
-  ws.addRow([]);
-  ws.addRow(['Mixing today']).font = { bold: true };
-  ws.addRow(['Unit', 'Quality', 'Bales', 'Kg']).font = { bold: true };
-  r.mixing.forEach(m => ws.addRow([m.unit, m.quality, m.bales, m.weight_kg]));
+  head(ws, `Bale stock as on ${date}`, ['Unit', '1st Opening', '1st Received', '1st Issued', '1st Stock', '2nd Opening', '2nd Received', '2nd Issued', '2nd Stock', 'Total Stock']);
+  const bale = baleDaily(date);
+  const q = x => [x.open, x.rec, x.iss, x.open + x.rec - x.iss];
+  bale.forEach(b => ws.addRow([b.name, ...q(b.q1), ...q(b.q2), q(b.q1)[3] + q(b.q2)[3]]));
+  const tot = bale.map(b => [...q(b.q1), ...q(b.q2), q(b.q1)[3] + q(b.q2)[3]]);
+  bold(ws.addRow(['TOTAL', ...Array.from({ length: 9 }, (_, k) => tot.reduce((s, r) => s + r[k], 0))]));
 
-  const sc = r.singleCone;
+  // Single cone: one line per unit / count / place
   ws = wb.addWorksheet('Single Cone');
-  ws.addRow([`Single cone stock ${r.date} (bags; ${sc.conesPerBag} loose cones = 1 bag)`]).font = { bold: true };
-  ws.addRow(['Count', ...sc.units.map(u => u.name), 'Total bags', 'Loose cones left']).font = { bold: true };
-  sc.rows.forEach(x => ws.addRow([x.count, ...sc.units.map(u => x.perUnit[u.code].total), x.total, x.looseLeft]));
-  ws.addRow(['TOTAL', ...sc.units.map(u => sc.unitTotals[u.code]), sc.grand]).font = { bold: true };
+  head(ws, `Single cone stock ${date} (${CONES_PER_BAG} loose cones = 1 bag)`, ['Unit', 'Count', 'Place', 'Bags', 'Loose cones', 'Total bags']);
+  const cells = db.prepare('SELECT * FROM single_cone WHERE date=?').all(date);
+  const plc = db.prepare('SELECT unit, count, place, bags, cones FROM single_cone_places WHERE date=?').all(date);
+  let sb = 0, sc = 0;
+  const counts = db.prepare('SELECT code FROM counts WHERE active=1 ORDER BY sort').all().map(c => c.code);
+  for (const u of units) for (const c of counts) {
+    const p = plc.filter(r => r.unit === u.code && r.count === c && (r.bags || r.cones));
+    const lines = p.length ? p.map(r => [r.place, r.bags, r.cones]) : cells.filter(r => r.unit === u.code && r.count === c && (r.bags || r.loose_cones)).map(r => ['', r.bags, r.loose_cones]);
+    lines.forEach(([pl, b, n]) => { ws.addRow([u.name, c, pl, b, n, b + Math.floor(n / CONES_PER_BAG)]); sb += b; sc += n; });
+  }
+  bold(ws.addRow(['TOTAL', '', '', sb, sc, sb + Math.floor(sc / CONES_PER_BAG)]));
+  if (sc % CONES_PER_BAG) ws.addRow([`Loose cones left after converting: ${sc % CONES_PER_BAG}`]);
+
+  // Chippam and Cone Bags: unit, actual count, marketing count, brand, quantity
+  for (const [kind, name] of [['chippam', 'Chippam'], ['conebags', 'Cone Bags']]) {
+    ws = wb.addWorksheet(name);
+    head(ws, `${name} ${date}`, ['Unit', 'Actual count', 'Marketing', 'Brand', 'Qty']);
+    const meta = Object.fromEntries(db.prepare('SELECT label, actual, unit FROM sheet_rows WHERE kind=?').all(kind).map(r => [r.label, r]));
+    let total = 0;
+    db.prepare('SELECT brand, count, qty FROM brand_stock WHERE kind=? AND date=? AND qty<>0').all(kind, date)
+      .filter(r => meta[r.count] && !r.count.startsWith('~new~'))
+      .sort((a, b) => unitName(meta[a.count].unit).localeCompare(unitName(meta[b.count].unit)))
+      .forEach(r => { ws.addRow([unitName(meta[r.count].unit), meta[r.count].actual || '', r.count, r.brand, r.qty]); total += r.qty; });
+    bold(ws.addRow(['TOTAL', '', '', '', total]));
+  }
 
   ws = wb.addWorksheet('Cone Winding');
-  ws.addRow([`Cone winding ${r.date}`]).font = { bold: true };
-  ws.addRow(['Party', 'Count', 'Weight kg', 'Note']).font = { bold: true };
-  r.winding.rows.forEach(x => ws.addRow([x.party, x.count, x.weight_kg, x.note]));
-  ws.addRow(['TOTAL', '', r.winding.total]).font = { bold: true };
+  head(ws, `Cone winding ${date}`, ['Party', 'Count', 'Weight kg', 'Note']);
+  const w = winding(date);
+  w.rows.forEach(x => ws.addRow([x.party, x.count, x.weight_kg, x.note]));
+  bold(ws.addRow(['TOTAL', '', w.total]));
 
-  wb.worksheets.forEach(s => s.columns.forEach(c => { c.width = 18; }));
+  // ?sheet=bale|single|chippam|conebags|winding keeps just that sheet
+  const names = { bale: 'Bale Stock', single: 'Single Cone', chippam: 'Chippam', conebags: 'Cone Bags', winding: 'Cone Winding' };
+  const only = names[req.query.sheet];
+  if (only) wb.worksheets.filter(w => w.name !== only).forEach(w => wb.removeWorksheet(w.id));
+  wb.worksheets.forEach(s => s.columns.forEach(c => { c.width = 16; }));
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename="stock-${r.date}.xlsx"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${only ? only.replace(/ /g, '-').toLowerCase() : 'stock'}-${date}.xlsx"`);
   await wb.xlsx.write(res);
   res.end();
 });
