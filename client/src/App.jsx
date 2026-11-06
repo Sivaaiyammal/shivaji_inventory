@@ -276,7 +276,7 @@ function PlacesCalc({ title, places, value, fields = [['bags', 'Bags'], ['cones'
 }
 
 // number box that also takes a sum such as 10+20+30+50: the result is applied on Enter / leaving the box
-function CalcInput({ value, onChange, placeholder, disabled }) {
+function CalcInput({ value, onChange, placeholder, disabled, width = 62 }) {
   const [text, setText] = useState(null); // null = not editing
   const [expr, setExpr] = useState(null); // the sum last typed, shown under the box while it still matches the value
   const commit = () => {
@@ -288,86 +288,56 @@ function CalcInput({ value, onChange, placeholder, disabled }) {
     }
     setText(null);
   };
-  return <span style={{ display: 'inline-flex', flexDirection: 'column', verticalAlign: 'top' }}><input type="text" inputMode="decimal" disabled={disabled} placeholder={placeholder} value={text ?? value} style={{ width: 62, textAlign: 'right' }}
+  return <span style={{ display: 'inline-flex', flexDirection: 'column', verticalAlign: 'top' }}><input type="text" inputMode="decimal" disabled={disabled} placeholder={placeholder} value={text ?? value} style={{ width, textAlign: 'right' }}
     onFocus={e => { setText(String(value)); e.target.select(); }} onChange={e => setText(e.target.value)} onBlur={commit}
     onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }} />
-    {expr && text === null && expr.out === String(value) && <small className="mute" title={expr.t + ' = ' + expr.out} style={{ textAlign: 'right', maxWidth: 62, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{expr.t}</small>}</span>;
+    {expr && text === null && expr.out === String(value) && <small className="mute" title={expr.t + ' = ' + expr.out} style={{ textAlign: 'right', maxWidth: width, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{expr.t}</small>}</span>;
 }
 
-// Single Cone: one table per unit with places (rows = counts, columns = the unit's places, bags / loose each).
-// Typing here fills the unit's column in the summary table above.
-function UnitPlacesTable({ unit, places: realPlaces, counts, cells, setPlace, setDirect }) {
-  // a unit without places gets one plain column (null) that holds its bags / cones directly
-  const allPlaces = realPlaces.length ? realPlaces : [null];
-  const val = (c, p, f) => {
-    const x = cells[`${unit.code}|${c}`];
-    return p === null ? (x?.[f === 'bags' ? 'bags' : 'loose_cones'] ?? '') : (x?.places?.[p]?.[f] ?? '');
-  };
-  const put = (c, p, f, v) => p === null ? setDirect(unit.code, c, f === 'bags' ? 'bags' : 'loose_cones', v) : setPlace(unit.code, c, p, f, v);
-  // columns work like rows: only the places picked from the dropdown (or already holding figures) are shown
-  const [addedP, setAddedP] = useState([]);
-  const placeHasData = p => counts.some(c => num(val(c, p, 'bags')) || num(val(c, p, 'cones')));
-  const places = realPlaces.length ? realPlaces.filter(p => addedP.includes(p) || placeHasData(p)) : [null];
-  const freeP = realPlaces.filter(p => !places.includes(p));
-  const blankCol = realPlaces.length > 0 && freeP.length > 0;
-  const sum = (cs, ps) => {
-    let bags = 0, cones = 0;
-    cs.forEach(c => ps.forEach(p => { bags += num(val(c, p, 'bags')); cones += num(val(c, p, 'cones')); }));
-    return { bags, cones };
-  };
-  const Pair = ({ t }) => <span className="pair"><b>{t.bags}</b><b>{t.cones}</b></span>;
-  // bags + cones converted at 40 per bag, e.g. 200 bags + 50 cones = 201 (Loose cone bag = 1)
-  const Eq = ({ t }) => { const extra = Math.floor(t.cones / 40), left = t.cones % 40; return <span className="eq" style={{ whiteSpace: 'nowrap' }}>= <b>{t.bags + extra}</b>{t.cones > 0 && <span className="loose"> (Loose cone bag = {extra})</span>}</span>; };
-  const sub = <span className="pair sub"><span>bags</span><span>loose</span></span>;
-  // only the counts picked from the dropdown (or already holding figures) are rows
-  const hasData = c => allPlaces.some(p => num(val(c, p, 'bags')) || num(val(c, p, 'cones')));
+// Single Cone entry for ONE unit and place (picked above the table): each line is a count, bags and loose cones.
+// The last line is always blank; choosing a count there fills it in and a new blank line appears.
+function SingleEntry({ unit, place, counts, cells, setPlace, setDirect, moveCount }) {
+  const field = f => (f === 'bags' ? 'bags' : 'loose_cones');
+  const val = (c, f) => { const x = cells[`${unit.code}|${c}`]; return place === null ? (x?.[field(f)] ?? '') : (x?.places?.[place]?.[f] ?? ''); };
+  const put = (c, f, v) => (place === null ? setDirect(unit.code, c, field(f), v) : setPlace(unit.code, c, place, f, v));
+  const hasData = c => num(val(c, 'bags')) || num(val(c, 'cones'));
   const [added, setAdded] = useState([]);
   const shown = counts.filter(c => added.includes(c) || hasData(c));
-  const free = counts.filter(c => !shown.includes(c));
+  const tot = cs => cs.reduce((t, c) => ({ bags: t.bags + num(val(c, 'bags')), cones: t.cones + num(val(c, 'cones')) }), { bags: 0, cones: 0 });
+  const all = tot(shown);
   return (
-    <details className="card unitcard" open>
-      <summary><b>{unit.name}</b>{realPlaces.length > 0 && <span className="mute"> by place</span>}</summary>
-      <div className="grid-wrap">
-        <table className="grid">
-          <thead><tr><th>Count</th>{places.map(p => <th key={p ?? 'qty'}>{p === null ? 'Stock' : <select value={p} disabled={placeHasData(p)} onChange={e => setAddedP(addedP.map(x => x === p ? e.target.value : x))}>{realPlaces.map(o => <option key={o} value={o} disabled={o !== p && places.includes(o)}>{o}</option>)}</select>}{p !== null && !placeHasData(p) && <> <button type="button" className="x" title="Remove column" onClick={() => setAddedP(addedP.filter(x => x !== p))}>✕</button></>}{sub}</th>)}{blankCol && <th><select value="" onChange={e => e.target.value && setAddedP([...addedP, e.target.value])}><option value="">Select place…</option>{realPlaces.map(o => <option key={o} value={o} disabled={places.includes(o)}>{o}</option>)}</select>{sub}</th>}<th className="tot">{unit.name} total{sub}</th></tr></thead>
-          <tbody>
-            {shown.map(c => (
-              <tr key={c}><td>
-                <select value={c} disabled={hasData(c)} onChange={e => setAdded(added.map(x => x === c ? e.target.value : x))}>
-                  {counts.map(o => <option key={o} value={o} disabled={o !== c && shown.includes(o)}>{o}</option>)}
-                </select>
-                {!hasData(c) && <> <button type="button" className="x" title="Remove row" onClick={() => setAdded(added.filter(x => x !== c))}>✕</button></>}</td>
-                {places.map(p => (
-                  <td key={p ?? 'qty'}>
-                    <CalcInput placeholder="bags" value={val(c, p, 'bags')} onChange={v => put(c, p, 'bags', v)} />{' '}
-                    <CalcInput placeholder="cones" value={val(c, p, 'cones')} onChange={v => put(c, p, 'cones', v)} />
-                  </td>
-                ))}
-                {blankCol && <td><input type="number" disabled placeholder="bags" style={{ width: 62 }} /> <input type="number" disabled placeholder="cones" style={{ width: 62 }} /></td>}
-                <td className="tot"><Pair t={sum([c], places)} /><div><Eq t={sum([c], places)} /></div></td></tr>
-            ))}
-            {free.length > 0 && (
-              // always one blank line: choosing a count here fills it and a new blank line appears below
-              <tr><td>
-                <select value="" onChange={e => e.target.value && setAdded([...added, e.target.value])}>
-                  <option value="">Select count…</option>
-                  {counts.map(o => <option key={o} value={o} disabled={shown.includes(o)}>{o}</option>)}
-                </select>
-              </td>
-                {places.map(p => (
-                  <td key={p ?? 'qty'}>
-                    <input type="number" disabled placeholder="bags" style={{ width: 62 }} />{' '}
-                    <input type="number" disabled placeholder="cones" style={{ width: 62 }} />
-                  </td>
-                ))}
-                {blankCol && <td><input type="number" disabled placeholder="bags" style={{ width: 62 }} /> <input type="number" disabled placeholder="cones" style={{ width: 62 }} /></td>}
-                <td className="tot"><Pair t={{ bags: 0, cones: 0 }} /></td></tr>
-            )}
-          </tbody>
-          <tfoot><tr><td>TOTAL</td>{places.map(p => <td key={p ?? 'qty'}><Pair t={sum(counts, [p])} /><div><Eq t={sum(counts, [p])} /></div></td>)}{blankCol && <td />}<td className="tot"><Pair t={sum(counts, places)} /><div><Eq t={sum(counts, places)} /></div></td></tr></tfoot>
-        </table>
-      </div>
-    </details>
+    <table className="rep entry">
+      <thead><tr><th>Count</th><th>Bags</th><th>Loose cones</th><th className="tot">Total</th></tr></thead>
+      <tbody>
+        {shown.map(c => { const t = tot([c]); return (
+          <tr key={c}>
+            <td>
+              <select value={c} onChange={e => { const to = e.target.value; if (hasData(c)) moveCount(unit.code, c, to, place); else setAdded(added.map(x => (x === c ? to : x))); }}>
+                {counts.map(o => <option key={o} value={o} disabled={o !== c && shown.includes(o)}>{o}</option>)}
+              </select>
+              {!hasData(c) && <> <button type="button" className="x" title="Remove line" onClick={() => setAdded(added.filter(x => x !== c))}>✕</button></>}
+            </td>
+            <td><CalcInput placeholder="bags" width={96} value={val(c, 'bags')} onChange={v => put(c, 'bags', v)} /></td>
+            <td><CalcInput placeholder="cones" width={96} value={val(c, 'cones')} onChange={v => put(c, 'cones', v)} /></td>
+            <td className="tot"><b>{t.bags}</b> <span className="mute">/</span> <b>{t.cones}</b><div>{coneEq(t.bags, t.cones)}</div></td>
+          </tr>
+        ); })}
+        {shown.length < counts.length && (
+          <tr>
+            <td>
+              <select value="" onChange={e => e.target.value && setAdded([...added, e.target.value])}>
+                <option value="">Select count…</option>
+                {counts.map(o => <option key={o} value={o} disabled={shown.includes(o)}>{o}</option>)}
+              </select>
+            </td>
+            <td><input type="text" disabled placeholder="bags" style={{ width: 96 }} /></td>
+            <td><input type="text" disabled placeholder="cones" style={{ width: 96 }} /></td>
+            <td className="tot" />
+          </tr>
+        )}
+      </tbody>
+      <tfoot><tr><td>TOTAL</td><td><b>{all.bags}</b></td><td><b>{all.cones}</b></td><td className="tot">{coneEq(all.bags, all.cones)}</td></tr></tfoot>
+    </table>
   );
 }
 
@@ -427,6 +397,26 @@ function Single({ date, masters, setMasters }) {
     const sum = f => placesOf(u).reduce((s, p) => s + num(places[p]?.[f]), 0);
     setCells({ ...cells, [key(u, c)]: { ...cur, places, bags: sum('bags') || '', loose_cones: sum('cones') || '' } });
   };
+  // change the count of a line that already has figures: its figures move to the new count (this unit and place only)
+  const moveCount = (u, from, to, p) => {
+    if (from === to) return;
+    const next = { ...cells };
+    const sumP = (x, f) => placesOf(u).reduce((t, q) => t + num(x.places?.[q]?.[f]), 0);
+    const src = cells[key(u, from)] || {};
+    const dst = cells[key(u, to)] || {};
+    if (p === null) {
+      next[key(u, to)] = { ...dst, bags: src.bags, loose_cones: src.loose_cones, places: dst.places || {} };
+      next[key(u, from)] = { ...src, bags: '', loose_cones: '', places: {} };
+    } else {
+      const moved = src.places?.[p] || {};
+      const d = { ...dst, places: { ...dst.places, [p]: moved } };
+      const o = { ...src, places: { ...src.places, [p]: { bags: '', cones: '' } } };
+      d.bags = sumP(d, 'bags') || ''; d.loose_cones = sumP(d, 'cones') || '';
+      o.bags = sumP(o, 'bags') || ''; o.loose_cones = sumP(o, 'cones') || '';
+      next[key(u, to)] = d; next[key(u, from)] = o;
+    }
+    setCells(next);
+  };
   const per = 40;
   // sum a set of cells: bags and loose cones are totalled separately; `all` = bags + loose cones converted at 40 per bag
   const sumCells = pairs => {
@@ -446,28 +436,73 @@ function Single({ date, masters, setMasters }) {
     await api('/api/single-cone', { method: 'PUT', body: { date, cells: list } });
     setMsg('Saved');
   };
+  // entry screen: pick the unit, then the place, then enter lines (count, bags, cones)
+  const [sel, setSel] = useState(() => { try { return JSON.parse(sessionStorage.getItem('singleSel')) || {}; } catch { return {}; } });
+  const unit = masters.units.find(u => u.code === sel.unit) || masters.units[0];
+  const ps = unit ? placesOf(unit.code) : [];
+  const place = ps.length ? (ps.includes(sel.place) ? sel.place : ps[0]) : null;
+  const choose = patch => {
+    const n = { unit: unit?.code, place, ...patch };
+    setSel(n);
+    try { sessionStorage.setItem('singleSel', JSON.stringify(n)); } catch { /* ignore */ }
+  };
+  const placeSum = (u, p) => masters.counts.reduce((t, c) => {
+    const x = cells[key(u.code, c)];
+    const v = p === null ? { bags: x?.bags, cones: x?.loose_cones } : { bags: x?.places?.[p]?.bags, cones: x?.places?.[p]?.cones };
+    return { bags: t.bags + num(v.bags), cones: t.cones + num(v.cones) };
+  }, { bags: 0, cones: 0 });
+  const lines = (u, p) => masters.counts.filter(c => { const x = cells[key(u.code, c)]; return p === null ? num(x?.bags) || num(x?.loose_cones) : num(x?.places?.[p]?.bags) || num(x?.places?.[p]?.cones); }).length;
+  if (!unit) return <div className="card">No units yet. Add one in Master.</div>;
+  const cur = placeSum(unit, place);
+  const unitTotal = sumCells(masters.counts.map(c => [unit.code, c]));
+  const everything = sumCells(masters.units.flatMap(u => masters.counts.map(c => [u.code, c])));
   return (
     <>
-    <div className="card">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h2>Single cone stock — {date}</h2>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <span className="mute">{msg}</span><button type="button" className="btn primary" onClick={save}>Save</button>
-        <div className="menu-wrap">
-          <button type="button" className="btn" onClick={() => openMenu('units')}>+ Unit</button>
-          {picker('units', 'unit', '/api/units', 'name', 'X Unit')}
-        </div>
-        </div>
+    <div className="card entrybar">
+      <div className="bar">
+        <label>Unit
+          <select value={unit.code} onChange={e => choose({ unit: e.target.value, place: undefined })}>
+            {masters.units.map(u => { const n = masters.counts.filter(c => { const x = cells[key(u.code, c)]; return num(x?.bags) || num(x?.loose_cones); }).length; return <option key={u.code} value={u.code}>{u.name}{n ? ` (${n} entered)` : ""}</option>; })}
+          </select>
+        </label>
+        {ps.length > 0 && (
+          <label>Place
+            <select value={place} onChange={e => choose({ place: e.target.value })}>
+              {ps.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </label>
+        )}
       </div>
-      <p className="mute">Enter stock in each unit's table below: pick a count on the blank line to add a row. {per} loose cones = 1 bag.</p>
-      {(() => { const t = sumCells(masters.units.flatMap(u => masters.counts.map(c => [u.code, c]))); return <p><b>All units:</b> <Pair t={t} /> <span className="mute">bags / loose</span> &nbsp; = <Overall t={t} /> <span className="mute">bags</span></p>; })()}
+      <div className="strip">
+        <b>{unit.name}{place ? ` | ${place}` : ''} | {date}</b>
+        <span>{lines(unit, place)} {lines(unit, place) === 1 ? 'line' : 'lines'} entered</span>
+        <span>Bags {cur.bags}</span><span>Loose cones {cur.cones}</span>
+        <span className="mute">{coneEq(cur.bags, cur.cones)}</span>
+      </div>
     </div>
 
-    {masters.units.map(u => (
-      <UnitPlacesTable key={u.code} unit={u} places={placesOf(u.code)} counts={masters.counts} cells={cells} setPlace={setPlace} setDirect={upd} />
-    ))}
+    <div className="card">
+      <h2>{unit.name}{place ? ` · ${place}` : ''} entry <span className="rep-sub">{per} loose cones = 1 bag</span></h2>
+      <SingleEntry key={unit.code + '|' + place} unit={unit} place={place} counts={masters.counts} cells={cells} setPlace={setPlace} setDirect={upd} moveCount={moveCount} />
+      <p style={{ margin: '12px 0 0', display: 'flex', gap: 12, alignItems: 'center' }}><button type="button" className="btn primary" onClick={save}>Save</button> <span className="mute">{msg}</span></p>
+    </div>
 
-    <p><button className="btn primary" onClick={save}>Save</button> <span className="mute">{msg}</span></p>
+    <div className="card">
+      <h2>{unit.name} summary</h2>
+      <table className="rep entry">
+        <thead><tr><th>{ps.length ? 'Place' : 'Unit'}</th><th>Bags</th><th>Loose cones</th><th className="tot">Total</th></tr></thead>
+        <tbody>
+          {(ps.length ? ps : [null]).map(p => { const t = placeSum(unit, p); return (
+            <tr key={p ?? 'u'} className={p === place ? 'cur' : ''} style={ps.length ? { cursor: 'pointer' } : undefined} onClick={() => ps.length && choose({ place: p })}>
+              <td>{p ?? unit.name}</td><td>{t.bags}</td><td>{t.cones}</td><td className="tot">{coneEq(t.bags, t.cones)}</td>
+            </tr>
+          ); })}
+        </tbody>
+        {ps.length > 0 && <tfoot><tr><td>{unit.name} total</td><td>{unitTotal.bags}</td><td>{unitTotal.cones}</td><td className="tot">{coneEq(unitTotal.bags, unitTotal.cones)}</td></tr></tfoot>}
+      </table>
+      <p style={{ marginBottom: 0 }}><b>All units:</b> {everything.bags} bags, {everything.cones} loose cones &nbsp; {coneEq(everything.bags, everything.cones)}</p>
+    </div>
+
     </>
   );
 }
