@@ -19,6 +19,7 @@ app.get('/api/masters', (_, res) => res.json({
   brands: db.prepare('SELECT name FROM brands WHERE active=1 ORDER BY name').all().map(b => b.name),
   places: db.prepare('SELECT name, grp "group" FROM places WHERE active=1 ORDER BY name').all(),
   ranges: db.prepare('SELECT name FROM ranges WHERE active=1 ORDER BY name').all().map(r => r.name),
+  qualities: db.prepare('SELECT id, name FROM qualities WHERE active=1 ORDER BY sort, id').all(),
 }));
 // Everything incl. inactive, with an 'used' flag (saved entries exist) for the Master tab
 app.get('/api/masters/all', (_, res) => res.json({
@@ -32,6 +33,7 @@ app.get('/api/masters/all', (_, res) => res.json({
   brands: db.prepare(`SELECT name, active, 0 used FROM brands ORDER BY name`).all(),
   places: db.prepare(`SELECT name, grp "group", active, 0 used FROM places ORDER BY name`).all(),
   ranges: db.prepare(`SELECT name, active, 0 used FROM ranges ORDER BY name`).all(),
+  qualities: db.prepare(`SELECT id, name, active, (EXISTS(SELECT 1 FROM bale_moves b WHERE b.quality=qualities.id) OR EXISTS(SELECT 1 FROM opening_balances o WHERE o.quality=qualities.id)) used FROM qualities ORDER BY sort, id`).all(),
 }));
 app.post('/api/parties', (req, res) => {
   const name = (req.body.name || '').trim();
@@ -41,7 +43,7 @@ app.post('/api/parties', (req, res) => {
 });
 
 // Rename / activate / deactivate master items (Master tab)
-const TABLES = { units: ['units', 'code'], counts: ['counts', 'code'], parties: ['parties', 'name'], brands: ['brands', 'name'], ranges: ['ranges', 'name'], places: ['places', 'name'] };
+const TABLES = { units: ['units', 'code'], counts: ['counts', 'code'], parties: ['parties', 'name'], brands: ['brands', 'name'], ranges: ['ranges', 'name'], places: ['places', 'name'], qualities: ['qualities', 'id'] };
 app.patch('/api/masters/:kind/:key', (req, res) => {
   const [table, keyCol] = TABLES[req.params.kind] || [];
   if (!table) return res.status(404).json({ error: 'Unknown master' });
@@ -53,6 +55,10 @@ app.patch('/api/masters/:kind/:key', (req, res) => {
     const v = name.trim();
     if (!v) return res.status(400).json({ error: 'Name required' });
     if (table === 'units') db.prepare('UPDATE units SET name=? WHERE code=?').run(v, key);
+    else if (table === 'qualities') {
+      if (db.prepare('SELECT 1 FROM qualities WHERE name=? AND id<>?').get(v, key)) return res.status(409).json({ error: `${v} already exists` });
+      db.prepare('UPDATE qualities SET name=? WHERE id=?').run(v, key);
+    }
     else {
       // count code / party name is the key used in saved entries, so rename it everywhere
       if (v !== key && db.prepare(`SELECT 1 FROM ${table} WHERE ${keyCol}=?`).get(v)) return res.status(409).json({ error: `${v} already exists` });
@@ -103,6 +109,21 @@ app.delete('/api/counts/:code', (req, res) => {
   db.prepare('DELETE FROM counts WHERE code=?').run(c);
   res.json({ ok: true });
 });
+app.post('/api/qualities', (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Quality name required' });
+  if (db.prepare('SELECT 1 FROM qualities WHERE name=?').get(name)) return res.status(409).json({ error: name + ' already exists' });
+  const next = db.prepare('SELECT COALESCE(MAX(sort),0)+1 n FROM qualities').get().n;
+  db.prepare('INSERT INTO qualities (name,sort) VALUES (?,?)').run(name, next);
+  res.json({ ok: true });
+});
+app.delete('/api/qualities/:id', (req, res) => {
+  const id = +req.params.id;
+  const n = db.prepare('SELECT (SELECT COUNT(*) FROM bale_moves WHERE quality=?) + (SELECT COUNT(*) FROM opening_balances WHERE quality=?) n').get(id, id).n;
+  if (inUse(res, n, 'this quality')) return;
+  db.prepare('DELETE FROM qualities WHERE id=?').run(id);
+  res.json({ ok: true });
+});
 app.post('/api/brands', (req, res) => {
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Brand name required' });
@@ -147,17 +168,18 @@ app.get('/api/bales', (req, res) => res.json(
   db.prepare('SELECT * FROM bale_moves WHERE date=? ORDER BY id DESC').all(D(req.query))));
 // Opening balances (Master tab)
 app.get('/api/opening', (_, res) => res.json(db.prepare('SELECT * FROM opening_balances ORDER BY date DESC, id DESC').all()));
-const openingOk = b => /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') && [1, 2].includes(+b.quality) && Number.isInteger(+b.bales) && +b.bales >= 0
+const qualityOk = q => !!db.prepare('SELECT 1 FROM qualities WHERE id=?').get(+q);
+const openingOk = b => /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') && qualityOk(b.quality) && Number.isInteger(+b.bales) && +b.bales >= 0
   && db.prepare('SELECT 1 FROM units WHERE code=?').get(b.unit);
 app.post('/api/opening', (req, res) => {
   const b = req.body;
-  if (!openingOk(b)) return res.status(400).json({ error: 'Unit, date, quality (1/2) and bales (0 or more, whole number) required' });
+  if (!openingOk(b)) return res.status(400).json({ error: 'Unit, date, quality (from Master) and bales (0 or more, whole number) required' });
   db.prepare('INSERT INTO opening_balances (date,unit,quality,bales) VALUES (?,?,?,?)').run(b.date, b.unit, +b.quality, +b.bales);
   res.json({ ok: true });
 });
 app.put('/api/opening/:id', (req, res) => {
   const b = req.body;
-  if (!openingOk(b)) return res.status(400).json({ error: 'Unit, date, quality (1/2) and bales (0 or more, whole number) required' });
+  if (!openingOk(b)) return res.status(400).json({ error: 'Unit, date, quality (from Master) and bales (0 or more, whole number) required' });
   db.prepare('UPDATE opening_balances SET date=?, unit=?, quality=?, bales=? WHERE id=?').run(b.date, b.unit, +b.quality, +b.bales, req.params.id);
   res.json({ ok: true });
 });
@@ -178,28 +200,32 @@ function baleDaily(date) {
   const opening = db.prepare('SELECT unit, quality, SUM(bales) bales FROM opening_balances WHERE date <= ? GROUP BY unit, quality').all(date);
   const units = db.prepare('SELECT code, name FROM units WHERE active=1 ORDER BY sort').all();
   const pick = (list, u, q, k) => list.find(r => r.unit === u && r.quality === q)?.[k] || 0;
-  return units.map(u => {
+  const qs = db.prepare('SELECT id, name, active FROM qualities ORDER BY sort, id').all();
+  const rows = units.map(u => {
     const f = q => ({
       open: pick(opening, u.code, q, 'bales') + pick(before, u.code, q, 'net'),
       rec: pick(day, u.code, q, 'rec'),
       iss: pick(day, u.code, q, 'iss'),
     });
-    return { unit: u.code, name: u.name, q1: f(1), q2: f(2) };
+    return { unit: u.code, name: u.name, q: Object.fromEntries(qs.map(x => [x.id, f(x.id)])) };
   });
+  // columns: active qualities, plus an inactive one while it still has stock or movement
+  const qualities = qs.filter(x => x.active || rows.some(r => r.q[x.id].open || r.q[x.id].rec || r.q[x.id].iss)).map(x => ({ id: x.id, name: x.name }));
+  return { qualities, rows };
 }
 app.get('/api/bale-stock', (req, res) => res.json(baleDaily(D(req.query))));
 app.post('/api/bales', (req, res) => {
   const b = req.body;
-  if (!['IN', 'MIX'].includes(b.type) || ![1, 2].includes(+b.quality) || !(+b.bales > 0))
-    return res.status(400).json({ error: 'type, quality (1/2) and bales > 0 required' });
+  if (!['IN', 'MIX'].includes(b.type) || !qualityOk(b.quality) || !(+b.bales > 0))
+    return res.status(400).json({ error: 'type, quality (from Master) and bales > 0 required' });
   db.prepare('INSERT INTO bale_moves (date,type,unit,quality,bales,weight_kg,note) VALUES (?,?,?,?,?,?,?)')
     .run(b.date || today(), b.type, b.unit, +b.quality, +b.bales, +b.weight_kg || 0, b.note || '');
   res.json({ ok: true });
 });
 app.put('/api/bales/:id', (req, res) => {
   const b = req.body;
-  if (!['IN', 'MIX'].includes(b.type) || ![1, 2].includes(+b.quality) || !(+b.bales > 0))
-    return res.status(400).json({ error: 'type, quality (1/2) and bales > 0 required' });
+  if (!['IN', 'MIX'].includes(b.type) || !qualityOk(b.quality) || !(+b.bales > 0))
+    return res.status(400).json({ error: 'type, quality (from Master) and bales > 0 required' });
   db.prepare('UPDATE bale_moves SET type=?, unit=?, quality=?, bales=? WHERE id=?').run(b.type, b.unit, +b.quality, +b.bales, req.params.id);
   res.json({ ok: true });
 });
@@ -333,6 +359,31 @@ app.post('/api/winding', (req, res) => {
     .run(w.date || today(), w.party, w.count, +w.weight_kg, w.note || '');
   res.json({ ok: true });
 });
+// one company's lines for a day (count + bags). Replaces that company's bag entries for the date; older kg entries are left alone.
+app.put('/api/winding/day', (req, res) => {
+  const { date, party, lines } = req.body || {};
+  const kind = req.body?.kind === 'winding' ? 'winding' : 'doubling';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || !party || !Array.isArray(lines)) return res.status(400).json({ error: 'date, party and lines required' });
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM winding WHERE date=? AND party=? AND kind=? AND weight_kg=0').run(date, party, kind);
+    const seen = new Set();
+    const ins = db.prepare("INSERT INTO winding (date,party,count,weight_kg,bags,note,kind) VALUES (?,?,?,0,?,?,?)");
+    for (const l of lines) {
+      const count = String(l.count || '').trim();
+      if (!count || seen.has(count)) continue;
+      seen.add(count);
+      const given = +l.bags, got = +l.inBags, ply = [2, 3, 4].includes(+l.ply) ? +l.ply : 2;
+      // Doubling: given = the count handed over, received = the doubled count (e.g. 2/56S) that comes back
+      if (kind === 'doubling') {
+        if (given > 0) ins.run(date, party, count, given, 'given', kind);
+        if (got > 0) ins.run(date, party, ply + '/' + count, got, 'received', kind);
+      } else if (given > 0) ins.run(date, party, count, given, '', kind);
+    }
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); return res.status(500).json({ error: e.message }); }
+  res.json({ ok: true });
+});
 app.delete('/api/winding/:id', (req, res) => {
   db.prepare('DELETE FROM winding WHERE id=?').run(req.params.id);
   res.json({ ok: true });
@@ -350,12 +401,13 @@ app.get('/api/report.xlsx', async (req, res) => {
 
   // Bale stock: opening / received / issued / stock for each quality
   let ws = wb.addWorksheet('Bale Stock');
-  head(ws, `Bale stock as on ${date}`, ['Unit', '1st Opening', '1st Received', '1st Issued', '1st Stock', '2nd Opening', '2nd Received', '2nd Issued', '2nd Stock', 'Total Stock']);
   const bale = baleDaily(date);
   const q = x => [x.open, x.rec, x.iss, x.open + x.rec - x.iss];
-  bale.forEach(b => ws.addRow([b.name, ...q(b.q1), ...q(b.q2), q(b.q1)[3] + q(b.q2)[3]]));
-  const tot = bale.map(b => [...q(b.q1), ...q(b.q2), q(b.q1)[3] + q(b.q2)[3]]);
-  bold(ws.addRow(['TOTAL', ...Array.from({ length: 9 }, (_, k) => tot.reduce((s, r) => s + r[k], 0))]));
+  const line = r => [...bale.qualities.flatMap(x => q(r.q[x.id])), bale.qualities.reduce((t, x) => t + q(r.q[x.id])[3], 0)];
+  head(ws, `Bale stock as on ${date}`, ['Unit', ...bale.qualities.flatMap(x => [`${x.name} Opening`, `${x.name} Received`, `${x.name} Issued`, `${x.name} Stock`]), 'Total Stock']);
+  bale.rows.forEach(b => ws.addRow([b.name, ...line(b)]));
+  const tot = bale.rows.map(line);
+  bold(ws.addRow(['TOTAL', ...Array.from({ length: bale.qualities.length * 4 + 1 }, (_, k) => tot.reduce((s, r) => s + r[k], 0))]));
 
   // Single cone: one line per unit / count / place
   ws = wb.addWorksheet('Single Cone');
@@ -375,7 +427,7 @@ app.get('/api/report.xlsx', async (req, res) => {
   // Chippam and Cone Bags: unit, actual count, marketing count, brand, quantity
   for (const [kind, name] of [['chippam', 'Chippam'], ['conebags', 'Cone Bags']]) {
     ws = wb.addWorksheet(name);
-    head(ws, `${name} ${date}`, ['Unit', 'Actual count', 'Marketing', 'Brand', 'Qty']);
+    head(ws, `${name} ${date}`, ['Unit', 'Actual count', 'Marking', 'Brand', 'Qty']);
     const meta = Object.fromEntries(db.prepare('SELECT label, actual, unit FROM sheet_rows WHERE kind=?').all(kind).map(r => [r.label, r]));
     let total = 0;
     db.prepare('SELECT brand, count, qty FROM brand_stock WHERE kind=? AND date=? AND qty<>0').all(kind, date)
@@ -391,10 +443,26 @@ app.get('/api/report.xlsx', async (req, res) => {
   w.rows.forEach(x => ws.addRow([x.party, x.count, x.weight_kg, x.note]));
   bold(ws.addRow(['TOTAL', '', w.total]));
 
+  ws = wb.addWorksheet('Doubling');
+  head(ws, `Doubling ${date}`, ['Company', 'Count given', 'Bags given', 'Count received', 'Bags received']);
+  const dbl = winding(date, 'doubling');
+  const grouped = {};
+  for (const x of dbl.rows) {
+    const rec = x.note === 'received';
+    const base = rec && x.count.includes('/') ? x.count.split('/').slice(1).join('/') : x.count;
+    const g = (grouped[x.party + '|' + base] ||= { party: x.party, count: base, given: 0, recCount: '', rec: 0 });
+    if (rec) { g.recCount = x.count; g.rec += x.bags; } else g.given += x.bags;
+  }
+  const list = Object.values(grouped);
+  list.forEach(g => ws.addRow([g.party, g.count, g.given, g.recCount, g.rec]));
+  bold(ws.addRow(['TOTAL', '', list.reduce((t, g) => t + g.given, 0), '', list.reduce((t, g) => t + g.rec, 0)]));
+
   // ?sheet=bale|single|chippam|conebags|winding keeps just that sheet
-  const names = { bale: 'Bale Stock', single: 'Single Cone', chippam: 'Chippam', conebags: 'Cone Bags', winding: 'Cone Winding' };
+  const names = { bale: 'Bale Stock', single: 'Single Cone', chippam: 'Chippam', conebags: 'Cone Bags', winding: 'Cone Winding', doubling: 'Doubling' };
   const only = names[req.query.sheet];
+  // the combined file leaves out Cone Winding and Doubling, like the combined report
   if (only) wb.worksheets.filter(w => w.name !== only).forEach(w => wb.removeWorksheet(w.id));
+  else wb.worksheets.filter(w => w.name === 'Cone Winding' || w.name === 'Doubling').forEach(w => wb.removeWorksheet(w.id));
   wb.worksheets.forEach(s => s.columns.forEach(c => { c.width = 16; }));
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${only ? only.replace(/ /g, '-').toLowerCase() : 'stock'}-${date}.xlsx"`);

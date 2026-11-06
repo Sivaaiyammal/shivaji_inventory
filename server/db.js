@@ -50,6 +50,14 @@ CREATE TABLE IF NOT EXISTS winding (
   count TEXT NOT NULL, weight_kg REAL NOT NULL, note TEXT DEFAULT '');
 `);
 
+// Cone winding is entered as bags per company and count (weight_kg is kept only for older entries)
+if (!db.prepare('PRAGMA table_info(winding)').all().some(c => c.name === 'bags'))
+  db.exec('ALTER TABLE winding ADD COLUMN bags REAL NOT NULL DEFAULT 0');
+
+// the Doubling tab shares this table; kind says which tab an entry belongs to
+if (!db.prepare('PRAGMA table_info(winding)').all().some(c => c.name === 'kind'))
+  db.exec("ALTER TABLE winding ADD COLUMN kind TEXT NOT NULL DEFAULT 'winding'");
+
 // Chippam rows carry an 'Actual Count' next to the marketing count (the row label)
 if (!db.prepare('PRAGMA table_info(sheet_rows)').all().some(c => c.name === 'actual'))
   db.exec("ALTER TABLE sheet_rows ADD COLUMN actual TEXT DEFAULT ''");
@@ -67,6 +75,27 @@ for (const col of ['bags_expr', 'cones_expr'])
 for (const t of ['units', 'counts', 'parties'])
   if (!db.prepare(`PRAGMA table_info(${t})`).all().some(c => c.name === 'active'))
     db.exec(`ALTER TABLE ${t} ADD COLUMN active INTEGER NOT NULL DEFAULT 1`);
+
+// Bale qualities are a Master list (ids 1 and 2 are the original 1st / 2nd)
+db.exec('CREATE TABLE IF NOT EXISTS qualities (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, sort INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1)');
+if (!db.prepare('SELECT COUNT(*) n FROM qualities').get().n)
+  db.exec("INSERT INTO qualities (id,name,sort) VALUES (1,'1st',1),(2,'2nd',2)");
+// the old tables only allowed quality 1 or 2: rebuild them without that limit
+for (const [t, ddl] of [
+  ['bale_moves', "CREATE TABLE bale_moves (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('IN','MIX')), unit TEXT NOT NULL, quality INTEGER NOT NULL, bales INTEGER NOT NULL, weight_kg REAL DEFAULT 0, note TEXT DEFAULT '')"],
+  ['opening_balances', 'CREATE TABLE opening_balances (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, unit TEXT NOT NULL, quality INTEGER NOT NULL, bales INTEGER NOT NULL)'],
+]) {
+  const sql = db.prepare("SELECT sql FROM sqlite_master WHERE name=?").get(t)?.sql || '';
+  if (!/CHECK\(quality/i.test(sql)) continue;
+  db.exec('BEGIN');
+  try {
+    db.exec(`ALTER TABLE ${t} RENAME TO ${t}_old`);
+    db.exec(ddl);
+    db.exec(`INSERT INTO ${t} (id,date,${t === "bale_moves" ? "type," : ""}unit,quality,bales${t === "bale_moves" ? ",weight_kg,note" : ""}) SELECT id,date,${t === "bale_moves" ? "type," : ""}unit,quality,bales${t === "bale_moves" ? ",weight_kg,note" : ""} FROM ${t}_old`);
+    db.exec(`DROP TABLE ${t}_old`);
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
 
 if (!db.prepare('SELECT COUNT(*) n FROM units').get().n) {
   const u = db.prepare('INSERT INTO units (code,name,sort,has_bales) VALUES (?,?,?,?)');

@@ -51,7 +51,7 @@ function Login({ onLogin }) {
 }
 
 // The current tab lives in the URL (#/single, #/master/places) and the date in sessionStorage, so a refresh stays where you were
-const TAB_KEYS = ['bales', 'single', 'winding', 'chippam', 'conebags', 'report', 'master'];
+const TAB_KEYS = ['bales', 'single', 'winding', 'doubling', 'chippam', 'conebags', 'report', 'master'];
 const hashParts = () => location.hash.replace(/^#\/?/, '').split('/');
 const tabFromHash = () => (TAB_KEYS.includes(hashParts()[0]) ? hashParts()[0] : 'bales');
 const store = {
@@ -71,7 +71,7 @@ function Shell({ user, onLogout }) {
   }, []);
   const [masters, setMasters] = useState(null);
   useEffect(() => { api('/api/masters').then(setMasters); }, []);
-  const tabs = [['bales', 'Bale Stock'], ['single', 'Single Cone'], ['chippam', 'Chippam'], ['conebags', 'Cone Bags'], ['winding', 'Cone Winding'], ['report', 'Report / Print'], ['master', 'Master']];
+  const tabs = [['bales', 'Bale Stock'], ['single', 'Single Cone'], ['chippam', 'Chippam'], ['conebags', 'Cone Bags'], ['winding', 'Cone Winding'], ['doubling', 'Doubling'], ['report', 'Report / Print'], ['master', 'Master']];
   return (
     <>
       <header>
@@ -86,6 +86,7 @@ function Shell({ user, onLogout }) {
         {!masters ? 'Loading…' : tab === 'bales' ? <Bales date={date} masters={masters} />
           : tab === 'single' ? <Single date={date} masters={masters} setMasters={setMasters} />
           : tab === 'winding' ? <Winding date={date} masters={masters} setMasters={setMasters} />
+          : tab === 'doubling' ? <Doubling date={date} masters={masters} />
           : tab === 'chippam' ? <BrandGrid kind="chippam" title="Chippam" date={date} withActual />
           : tab === 'conebags' ? <BrandGrid kind="conebags" title="Cone bags" date={date} withActual />
           : tab === 'master' ? <Master setMasters={setMasters} />
@@ -97,65 +98,90 @@ function Shell({ user, onLogout }) {
 
 function Bales({ date, masters }) {
   const baleUnits = masters.units;
-  const blank = { type: 'IN', unit: baleUnits[0].code, quality: 1, bales: '', weight_kg: '', note: '' };
+  const qualities = masters.qualities || [];
+  const blank = { type: 'IN', unit: baleUnits[0].code, quality: qualities[0]?.id ?? 1, bales: '', weight_kg: '', note: '' };
   const [f, setF] = useState(blank);
   const [moves, setMoves] = useState([]);
-  const [stock, setStock] = useState([]);
+  const [stock, setStock] = useState({ qualities: [], rows: [] });
   const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const [pending, setPending] = useState([]); // new entries, not saved yet
+  const [edits, setEdits] = useState({}); // id -> changed fields, not saved yet
+  const [removed, setRemoved] = useState([]); // ids to delete on Save
   const load = useCallback(() => {
     api(`/api/bales?date=${date}`).then(setMoves);
     api(`/api/bale-stock?date=${date}`).then(setStock);
   }, [date]);
   useEffect(load, [load]);
-  const save = async e => {
-    e.preventDefault(); setErr('');
-    try { await api('/api/bales', { method: 'POST', body: { ...f, date } }); setF({ ...f, bales: '', weight_kg: '', note: '' }); load(); }
-    catch (x) { setErr(x.message); }
+  useEffect(() => { setPending([]); setEdits({}); setRemoved([]); setErr(''); setMsg(''); }, [date]);
+  const isNew = id => String(id).startsWith('new-');
+  const dirty = pending.length > 0 || removed.length > 0 || Object.keys(edits).length > 0;
+  // what the tables show: saved entries with the unsaved changes applied, then the new ones
+  const view = [...moves.filter(m => !removed.includes(m.id)).map(m => ({ ...m, ...edits[m.id] })), ...pending];
+  const add = e => {
+    e.preventDefault(); setErr(''); setMsg('');
+    if (!(+f.bales > 0)) return setErr('Enter the number of bales');
+    setPending([...pending, { id: 'new-' + Date.now() + '-' + pending.length, type: f.type, unit: f.unit, quality: +f.quality, bales: +f.bales, weight_kg: 0, note: '' }]);
+    setF({ ...f, bales: '' });
   };
-  const del = async id => { await api(`/api/bales/${id}`, { method: 'DELETE' }); load(); };
-  const edit = async (m, patch) => {
+  const del = id => { setMsg(''); if (isNew(id)) setPending(pending.filter(p => p.id !== id)); else setRemoved([...removed, id]); };
+  const edit = (m, patch) => {
+    setMsg('');
+    const p = patch.bales !== undefined ? { ...patch, bales: +patch.bales } : patch;
+    if (isNew(m.id)) setPending(pending.map(x => (x.id === m.id ? { ...x, ...p } : x)));
+    else setEdits({ ...edits, [m.id]: { ...edits[m.id], ...p } });
+  };
+  const save = async () => {
     setErr('');
-    try { await api(`/api/bales/${m.id}`, { method: 'PUT', body: { ...m, ...patch } }); }
-    catch (x) { setErr(x.message); }
-    load();
+    try {
+      for (const id of removed) await api(`/api/bales/${id}`, { method: 'DELETE' });
+      for (const [id, patch] of Object.entries(edits)) {
+        const orig = moves.find(m => String(m.id) === String(id));
+        if (orig && !removed.includes(orig.id)) await api(`/api/bales/${id}`, { method: 'PUT', body: { ...orig, ...patch } });
+      }
+      for (const p of pending) await api('/api/bales', { method: 'POST', body: { type: p.type, unit: p.unit, quality: p.quality, bales: p.bales, weight_kg: 0, note: '', date } });
+      setPending([]); setEdits({}); setRemoved([]); setMsg('Saved'); load();
+    } catch (x) { setErr(x.message); }
   };
   const set = k => e => setF({ ...f, [k]: e.target.value });
   return (
     <>
       <div className="card">
         <h2>Bale received / issued to mixing</h2>
-        <form className="form" onSubmit={save}>
+        <form className="form" onSubmit={add}>
           <label>Entry
             <select value={f.type} onChange={set('type')}><option value="IN">Received (load)</option><option value="MIX">Issued to mixing</option></select></label>
           <label>Unit
             <select value={f.unit} onChange={set('unit')}>{baleUnits.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></label>
           <label>Quality
-            <select value={f.quality} onChange={set('quality')}><option value={1}>1st</option><option value={2}>2nd</option></select></label>
+            <select value={f.quality} onChange={set('quality')}>{qualities.map(q => <option key={q.id} value={q.id}>{q.name}</option>)}</select></label>
           <label>Bales<input type="number" min="1" value={f.bales} onChange={set('bales')} required /></label>
-          <button className="btn primary">Add</button>
+          <button className="btn primary">Add to list</button>
         </form>
         {err && <div className="err">{err}</div>}
       </div>
 
       <div className="two">
-        <BaleEntries title="Received" rows={moves.filter(m => m.type === 'IN')} baleUnits={baleUnits} edit={edit} del={del} date={date} />
-        <BaleEntries title="Issued" rows={moves.filter(m => m.type === 'MIX')} baleUnits={baleUnits} edit={edit} del={del} date={date} />
+        <BaleEntries title="Received" rows={view.filter(m => m.type === 'IN')} baleUnits={baleUnits} qualities={qualities} stockQualities={stock.qualities || []} edit={edit} del={del} date={date} />
+        <BaleEntries title="Issued" rows={view.filter(m => m.type === 'MIX')} baleUnits={baleUnits} qualities={qualities} stockQualities={stock.qualities || []} edit={edit} del={del} date={date} />
       </div>
+      <p style={{ display: 'flex', gap: 12, alignItems: 'center' }}><button type="button" className="btn primary" onClick={save}>Save</button>
+        <span className="mute">{dirty ? 'Unsaved changes. Click Save to keep them.' : msg}</span></p>
 
       <div className="card">
         <h2>Stock as on {date} <span className="mute">(opening = previous day stock)</span></h2>
-        <BaleStockTable rows={stock} />
+        <BaleStockTable rows={stock.rows || []} qualities={stock.qualities || []} />
       </div>
     </>
   );
 }
 
 // Stock = opening + received - issued, running total up to the selected date (read-only)
-function BaleStockTable({ rows }) {
+function BaleStockTable({ rows, qualities }) {
   const sum = f => rows.reduce((s, r) => s + f(r), 0);
   const cols = [
-    ['1st quality', r => r.q1], ['2nd quality', r => r.q2],
-    ['Total', r => ({ open: r.q1.open + r.q2.open, rec: r.q1.rec + r.q2.rec, iss: r.q1.iss + r.q2.iss })],
+    ...qualities.map(x => [x.name + ' quality', r => r.q[x.id]]),
+    ['Total', r => qualities.reduce((t, x) => ({ open: t.open + r.q[x.id].open, rec: t.rec + r.q[x.id].rec, iss: t.iss + r.q[x.id].iss }), { open: 0, rec: 0, iss: 0 })],
   ];
   const heads = ['Opening', 'Received', 'Issued', 'Stock'];
   // stock = opening + received - issued
@@ -171,7 +197,7 @@ function BaleStockTable({ rows }) {
       </thead>
       <tbody>
         {rows.map(r => <tr key={r.unit}><td>{r.name}</td>{cols.map(([t, get]) => cells(t, get(r), 'b'))}</tr>)}
-        {!rows.length && <tr><td colSpan="13" className="mute">No units</td></tr>}
+        {!rows.length && <tr><td colSpan={qualities.length * 4 + 5} className="mute">No units</td></tr>}
       </tbody>
       <tfoot><tr><td>TOTAL</td>
         {cols.map(([t, get]) => cells(t, { open: sum(r => get(r).open), rec: sum(r => get(r).rec), iss: sum(r => get(r).iss) }))}
@@ -181,7 +207,8 @@ function BaleStockTable({ rows }) {
 }
 
 // One ledger table on the Bale Stock tab: Received (type IN) or Issued (type MIX)
-function BaleEntries({ title, rows, baleUnits, edit, del, date }) {
+function BaleEntries({ title, rows, baleUnits, qualities, stockQualities, edit, del, date }) {
+  const qname = id => [...qualities, ...stockQualities].find(q => q.id === id)?.name || `Quality ${id}`;
   const total = rows.reduce((s, m) => s + m.bales, 0);
   return (
     <div className="card">
@@ -192,9 +219,9 @@ function BaleEntries({ title, rows, baleUnits, edit, del, date }) {
           {rows.map(m => (
             <tr key={m.id}>
               <td><select value={m.unit} onChange={e => edit(m, { unit: e.target.value })}>{baleUnits.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></td>
-              <td><select value={m.quality} onChange={e => edit(m, { quality: +e.target.value })}><option value={1}>1st</option><option value={2}>2nd</option></select></td>
+              <td><select value={m.quality} onChange={e => edit(m, { quality: +e.target.value })}>{qualities.some(q => q.id === m.quality) || <option value={m.quality}>{qname(m.quality)}</option>}{qualities.map(q => <option key={q.id} value={q.id}>{q.name}</option>)}</select></td>
               <td><input type="number" min="1" key={m.bales} defaultValue={m.bales} onBlur={e => +e.target.value !== m.bales && edit(m, { bales: e.target.value })} /></td>
-              <td style={{ textAlign: 'left' }}>{m.note}</td>
+              <td style={{ textAlign: 'left' }}>{String(m.id).startsWith('new-') ? <span className="badge off">unsaved</span> : m.note}</td>
               <td><button className="x" onClick={() => del(m.id)}>✕</button></td></tr>
           ))}
           {!rows.length && <tr><td colSpan="5" className="mute">No entries for this date</td></tr>}
@@ -202,25 +229,6 @@ function BaleEntries({ title, rows, baleUnits, edit, del, date }) {
         <tfoot><tr><td>TOTAL</td><td /><td>{total}</td><td /><td /></tr></tfoot>
       </table>
     </div>
-  );
-}
-
-function BaleTable({ stock, adjust }) {
-  const sum = f => stock.reduce((s, b) => s + f(b), 0);
-  // editable on the Bale Stock tab (adjust given), plain numbers on the report
-  const cell = (b, q) => adjust
-    ? <input type="number" min="0" key={b[q].bales} defaultValue={b[q].bales} onBlur={e => adjust(b.unit, q === "q1" ? 1 : 2, b[q].bales, e.target.value)} />
-    : b[q].bales;
-  return (
-    <table>
-      <thead><tr><th>Unit</th><th>1st quality</th><th>2nd quality</th><th>Total</th></tr>
-        </thead>
-      <tbody>{stock.map(b => (
-        <tr key={b.unit}><td>{b.unit} Unit</td><td>{cell(b, "q1")}</td><td>{cell(b, "q2")}</td><td>{b.bales}</td></tr>
-      ))}</tbody>
-      <tfoot><tr><td>TOTAL</td><td>{sum(b => b.q1.bales)}</td><td>{sum(b => b.q2.bales)}</td>
-        <td>{sum(b => b.bales)}</td></tr></tfoot>
-    </table>
   );
 }
 
@@ -296,7 +304,7 @@ function CalcInput({ value, onChange, placeholder, disabled, width = 62 }) {
 
 // Single Cone entry for ONE unit and place (picked above the table): each line is a count, bags and loose cones.
 // The last line is always blank; choosing a count there fills it in and a new blank line appears.
-function SingleEntry({ unit, place, counts, cells, setPlace, setDirect, moveCount }) {
+function SingleEntry({ unit, place, counts, cells, setPlace, setDirect, moveCount, clearLine }) {
   const field = f => (f === 'bags' ? 'bags' : 'loose_cones');
   const val = (c, f) => { const x = cells[`${unit.code}|${c}`]; return place === null ? (x?.[field(f)] ?? '') : (x?.places?.[place]?.[f] ?? ''); };
   const put = (c, f, v) => (place === null ? setDirect(unit.code, c, field(f), v) : setPlace(unit.code, c, place, f, v));
@@ -315,7 +323,7 @@ function SingleEntry({ unit, place, counts, cells, setPlace, setDirect, moveCoun
               <select value={c} onChange={e => { const to = e.target.value; if (hasData(c)) moveCount(unit.code, c, to, place); else setAdded(added.map(x => (x === c ? to : x))); }}>
                 {counts.map(o => <option key={o} value={o} disabled={o !== c && shown.includes(o)}>{o}</option>)}
               </select>
-              {!hasData(c) && <> <button type="button" className="x" title="Remove line" onClick={() => setAdded(added.filter(x => x !== c))}>✕</button></>}
+              <> <button type="button" className="x" title="Remove this line" onClick={() => { if (hasData(c)) clearLine(unit.code, c, place); setAdded(added.filter(x => x !== c)); }}>✕</button></>
             </td>
             <td><CalcInput placeholder="bags" width={96} value={val(c, 'bags')} onChange={v => put(c, 'bags', v)} /></td>
             <td><CalcInput placeholder="cones" width={96} value={val(c, 'cones')} onChange={v => put(c, 'cones', v)} /></td>
@@ -417,6 +425,14 @@ function Single({ date, masters, setMasters }) {
     }
     setCells(next);
   };
+  // remove a line that has figures: they are cleared for this unit and place (the change is saved with Save)
+  const clearLine = (u, c, p) => {
+    const cur = cells[key(u, c)] || {};
+    if (p === null) { setCells({ ...cells, [key(u, c)]: { ...cur, bags: '', loose_cones: '', places: {} } }); return; }
+    const places = { ...cur.places, [p]: { bags: '', cones: '' } };
+    const sum = f => placesOf(u).reduce((t, q) => t + num(places[q]?.[f]), 0);
+    setCells({ ...cells, [key(u, c)]: { ...cur, places, bags: sum('bags') || '', loose_cones: sum('cones') || '' } });
+  };
   const per = 40;
   // sum a set of cells: bags and loose cones are totalled separately; `all` = bags + loose cones converted at 40 per bag
   const sumCells = pairs => {
@@ -483,7 +499,7 @@ function Single({ date, masters, setMasters }) {
 
     <div className="card">
       <h2>{unit.name}{place ? ` · ${place}` : ''} entry <span className="rep-sub">{per} loose cones = 1 bag</span></h2>
-      <SingleEntry key={unit.code + '|' + place} unit={unit} place={place} counts={masters.counts} cells={cells} setPlace={setPlace} setDirect={upd} moveCount={moveCount} />
+      <SingleEntry key={unit.code + '|' + place} unit={unit} place={place} counts={masters.counts} cells={cells} setPlace={setPlace} setDirect={upd} moveCount={moveCount} clearLine={clearLine} />
       <p style={{ margin: '12px 0 0', display: 'flex', gap: 12, alignItems: 'center' }}><button type="button" className="btn primary" onClick={save}>Save</button> <span className="mute">{msg}</span></p>
     </div>
 
@@ -510,7 +526,7 @@ function Single({ date, masters, setMasters }) {
 function Master({ setMasters }) {
   const [sec, setSecState] = useState(() => hashParts()[1] || 'units');
   const setSec = k => { setSecState(k); location.hash = '/master/' + k; };
-  const [all, setAll] = useState({ units: [], places: [], counts: [], parties: [], brands: [], ranges: [] });
+  const [all, setAll] = useState({ units: [], places: [], counts: [], parties: [], brands: [], ranges: [], qualities: [] });
   const [f, setF] = useState({ code: '', name: '', group: '' });
   const [err, setErr] = useState('');
   const enc = encodeURIComponent;
@@ -529,6 +545,7 @@ function Master({ setMasters }) {
     parties: { title: 'Companies / parties', hint: 'Parties used in Cone Winding.', list: all.parties, id: p => p.name, label: () => '' },
     brands: { title: 'Brands', hint: 'Brand names, used as columns in Chippam and Cone Bags.', list: all.brands, id: b => b.name, label: () => '' },
     opening: { title: 'Opening balances', list: [], id: () => '', label: () => '' },
+    qualities: { title: 'Qualities', hint: 'Bale qualities (1st, 2nd, …). Each is a column in the Bale Stock table and an option when entering bales.', list: all.qualities, id: q => q.id, label: () => '', show: q => q.name },
     ranges: { title: 'Count ranges', hint: 'Count ranges such as 3/56 - 3/62, used as rows in Chippam and Cone Bags.', list: all.ranges, id: r => r.name, label: () => '' },
   };
   const S = SECTIONS[sec] || SECTIONS.units;
@@ -545,7 +562,7 @@ function Master({ setMasters }) {
     if (await run(url, 'POST', body)) setF({ code: '', name: '', group: f.group });
   };
   const rename = it => {
-    const v = (window.prompt('Rename', sec === 'units' ? it.name : S.id(it)) || '').trim();
+    const v = (window.prompt('Rename', sec === 'units' || sec === 'qualities' ? shown(it) : S.id(it)) || '').trim();
     if (v) run(`/api/masters/${sec}/${enc(S.id(it))}`, 'PATCH', { name: v });
   };
   const toggle = it => run(`/api/masters/${sec}/${enc(S.id(it))}`, 'PATCH', { active: !it.active });
@@ -555,7 +572,7 @@ function Master({ setMasters }) {
       <div className="subtabs">
         {Object.entries(SECTIONS).map(([k, v]) => <button key={k} className={sec === k ? 'on' : ''} onClick={() => switchSec(k)}>{v.title}</button>)}
       </div>
-      {sec === 'opening' ? <OpeningBalances units={groups} /> : <>
+      {sec === 'opening' ? <OpeningBalances units={groups} qualities={all.qualities.filter(q => q.active)} allQualities={all.qualities} /> : <>
       <h2 className="page-title">{S.title}</h2>
       <p className="mute">{S.hint} Deactivate anything no longer in use; only unused items can be deleted.</p>
       {err && <div className="err">{err}</div>}
@@ -572,10 +589,10 @@ function Master({ setMasters }) {
                 {groups.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></label>
             </>
           ) : (
-            <label>{'New ' + { units: 'unit', counts: 'count', parties: 'party', brands: 'brand' }[sec]}
+            <label>{'New ' + { units: 'unit', counts: 'count', parties: 'party', brands: 'brand', qualities: 'quality' }[sec]}
               <input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder={sec === 'units' ? 'e.g. X Unit' : sec === 'counts' ? 'e.g. 30S' : 'Name'} required /></label>
           )}
-          <button className="btn primary">Add {{ units: 'unit', places: 'place', counts: 'count', parties: 'party', brands: 'brand', ranges: 'range' }[sec]}</button>
+          <button className="btn primary">Add {{ units: 'unit', places: 'place', counts: 'count', parties: 'party', brands: 'brand', ranges: 'range', qualities: 'quality' }[sec]}</button>
         </form>
       </div>
       <div className="card list">
@@ -602,8 +619,8 @@ function Master({ setMasters }) {
 }
 
 // Master > Opening balances: opening bale stock per unit, date and quality; counted in the Bale Stock table
-function OpeningBalances({ units }) {
-  const blank = { unit: '', date: iso(), quality: 1, bales: '' };
+function OpeningBalances({ units, qualities, allQualities }) {
+  const blank = { unit: '', date: iso(), quality: '', bales: '' };
   const [f, setF] = useState(blank);
   const [rows, setRows] = useState([]);
   const [err, setErr] = useState('');
@@ -616,11 +633,11 @@ function OpeningBalances({ units }) {
   };
   const add = async e => {
     e.preventDefault();
-    if (await call('/api/opening', 'POST', { ...f, unit: f.unit || units[0]?.code })) setF({ ...f, bales: '' });
+    if (await call('/api/opening', 'POST', { ...f, unit: f.unit || units[0]?.code, quality: f.quality || qualities[0]?.id })) setF({ ...f, bales: '' });
   };
   const edit = (o, patch) => call(`/api/opening/${o.id}`, 'PUT', { ...o, ...patch });
   const del = o => window.confirm(`Delete this opening balance (${unitName(o.unit)}, ${o.date})?`) && call(`/api/opening/${o.id}`, 'DELETE');
-  const quality = <><option value={1}>1st</option><option value={2}>2nd</option></>;
+  const quality = qualities.map(q => <option key={q.id} value={q.id}>{q.name}</option>);
   return (
     <>
       <h2 className="page-title">Opening balances</h2>
@@ -631,7 +648,7 @@ function OpeningBalances({ units }) {
           <label>Unit<select value={f.unit || units[0]?.code || ''} onChange={e => setF({ ...f, unit: e.target.value })} required>
             {units.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></label>
           <label>Date<input type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} required /></label>
-          <label>Quality<select value={f.quality} onChange={e => setF({ ...f, quality: +e.target.value })}>{quality}</select></label>
+          <label>Quality<select value={f.quality || qualities[0]?.id || ''} onChange={e => setF({ ...f, quality: +e.target.value })}>{quality}</select></label>
           <label>Opening bales<input type="number" min="0" step="1" value={f.bales} onChange={e => setF({ ...f, bales: e.target.value })} required style={{ width: 120 }} /></label>
           <button className="btn primary">Add opening balance</button>
         </form>
@@ -646,7 +663,7 @@ function OpeningBalances({ units }) {
                 <td><select value={o.unit} onChange={e => edit(o, { unit: e.target.value })}>
                   {units.some(u => u.code === o.unit) || <option value={o.unit}>{unitName(o.unit)}</option>}
                   {units.map(u => <option key={u.code} value={u.code}>{u.name}</option>)}</select></td>
-                <td><select value={o.quality} onChange={e => edit(o, { quality: +e.target.value })}>{quality}</select></td>
+                <td><select value={o.quality} onChange={e => edit(o, { quality: +e.target.value })}>{qualities.some(q => q.id === o.quality) || <option value={o.quality}>{allQualities.find(q => q.id === o.quality)?.name || o.quality}</option>}{quality}</select></td>
                 <td><input type="number" min="0" step="1" key={o.bales} defaultValue={o.bales} onBlur={e => e.target.value !== '' && +e.target.value !== o.bales && edit(o, { bales: e.target.value })} /></td>
                 <td><button className="x" title="Delete" onClick={() => del(o)}>✕</button></td></tr>
             ))}
@@ -675,14 +692,21 @@ function BrandGrid({ kind, title, date, withActual }) {
   const [menu, setMenu] = useState(null); // {type:'cols'|'rows', items}: Master choices not yet on this sheet
   const key = (b, r) => `${b}|${r}`;
   const enc = encodeURIComponent;
-  const load = useCallback(() => {
+  // keep = true: a layout change (new blank line) reloads the sheet but must not lose what is typed and not saved yet
+  const load = useCallback((keep = false) => {
     api(`/api/brand-stock/${kind}?date=${date}`).then(d => {
       const m = {};
       d.cells.forEach(c => { m[key(c.brand, c.count)] = c.qty || ''; });
-      setRows(d.rows); setActuals(d.actuals || {}); setUnits(d.units || {});
       const cp = {};
       (d.places || []).forEach(p => { const k = key(p.brand, p.count); cp[k] = { ...cp[k], [p.place]: { qty: p.qty || '' } }; });
-      setCellPlaces(cp); setCols(d.cols); setCells(m); setMsg(''); setLoaded(true);
+      const lab = new Set(d.rows);
+      const merge = (srv, prev, ok) => (keep ? { ...srv, ...Object.fromEntries(Object.entries(prev).filter(([k]) => ok(k))) } : srv);
+      const inRows = k => lab.has(k) || [...lab].some(l => k.endsWith('|' + l));
+      setRows(d.rows); setUnits(d.units || {}); setCols(d.cols);
+      setActuals(p => merge(d.actuals || {}, p, k => lab.has(k) && p[k]));
+      setCells(p => merge(m, p, k => inRows(k) && p[k] !== undefined));
+      setCellPlaces(p => merge(cp, p, inRows));
+      setMsg(''); setLoaded(true);
     });
   }, [kind, date]);
   useEffect(() => { setLoaded(false); load(); }, [load]);
@@ -691,12 +715,22 @@ function BrandGrid({ kind, title, date, withActual }) {
   // pick a different marketing count for a row: rename it on the server, then re-key what is typed but not saved yet
   const changeMarketing = async (old, label) => {
     if (!label || label === old) return;
+    const tk = (l, u = units[old]) => `${u}|${place}|${l}`;
+    // that count already has a line in another place of this unit: show that line here instead of renaming the blank one
+    if (isNew(old) && rows.includes(label)) {
+      setTouched({ ...touched, [tk(label)]: 1 });
+      // the Actual Count already picked on the blank line moves to that line
+      if (actuals[old]) setActuals({ ...actuals, [label]: actuals[label] || actuals[old], [old]: '' });
+      return;
+    }
+    if (isNew(old)) setTouched({ ...touched, [tk(label)]: 1 });
     try { await api(`/api/brand-stock/${kind}/rows/${enc(old)}`, { method: 'PATCH', body: { label } }); }
     catch (x) { return setMsg(x.message); }
     const rekey = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k.endsWith(`|${old}`) ? k.slice(0, -old.length) + label : k === old ? label : k, v]));
     setRows(rows.map(x => (x === old ? label : x)));
     setCells(rekey(cells)); setActuals(rekey(actuals)); setUnits(rekey(units)); setCellPlaces(rekey(cellPlaces));
   };
+  const [touched, setTouched] = useState({}); // lines picked in a place this session, kept visible while still empty
   const isNew = label => label.startsWith('~new~'); // blank row from the Add button, no marketing count chosen yet
   const options = cur => [...new Set([...ranges, cur].filter(Boolean))];
   const openMenu = async type => {
@@ -711,7 +745,7 @@ function BrandGrid({ kind, title, date, withActual }) {
   };
   const remove = async (type, name) => {
     if (!window.confirm(`Remove ${name.startsWith('~new~') ? 'this row' : name} from this sheet?`)) return;
-    try { await api(`/api/brand-stock/${kind}/${type}/${enc(name)}`, { method: 'DELETE' }); load(); }
+    try { await api(`/api/brand-stock/${kind}/${type}/${enc(name)}`, { method: 'DELETE' }); load(true); }
     catch (x) { setMsg(x.message); }
   };
   const picker = (type, noun) => menu?.type === type && (
@@ -744,19 +778,23 @@ function BrandGrid({ kind, title, date, withActual }) {
     const sum = ps.reduce((t, x) => t + num(cp[x]?.qty), 0);
     setCellPlaces({ ...cellPlaces, [k]: cp }); setCells({ ...cells, [k]: sum ? String(sum) : '' });
   };
+  const placeTotal = (brands, labels, p) => brands.reduce((s, b) => s + labels.reduce((t, r) => t + num(cellPlaces[key(b, r)]?.[p]?.qty), 0), 0);
+  // entry screen state: unit, then place (kept for the session)
+  const [sel, setSel] = useState(() => { try { return JSON.parse(sessionStorage.getItem(kind + 'Sel')) || {}; } catch { return {}; } });
+  const choose = patch => { const n = { ...sel, ...patch }; setSel(n); try { sessionStorage.setItem(kind + 'Sel', JSON.stringify(n)); } catch { /* ignore */ } };
+  const place = (() => { const ps = unitPlaces(sel.unit && mast.units.some(u => u.code === sel.unit) ? sel.unit : mast.units[0]?.code); return ps.includes(sel.place) ? sel.place : ps[0] ?? null; })();
+  // lines shown for the place picked: the blank line, lines with a quantity here, and lines just picked here
+  const visible = g => g.rows.filter(r => isNew(r) || touched[`${g.code}|${place}|${r}`] || (unitPlaces(g.code).length ? placeTotal(cols, [r], place) : total(cols, [r])));
   const row = (r, g, idx) => (
               <tr key={r}>
-                {withActual && <td><select value={actuals[r] ?? ''} onChange={e => setActuals({ ...actuals, [r]: e.target.value })}><option value="">Select count</option>{options(actuals[r]).map(x => <option key={x}>{x}</option>)}</select></td>}
-                <td className={withActual ? "mk" : ""}>{withActual ? <select value={isNew(r) ? '' : r} onChange={e => changeMarketing(r, e.target.value)}>{isNew(r) && <option value="">Select count</option>}{options(r).filter(x => !isNew(x) && (x === r || !rows.includes(x))).map(x => <option key={x}>{x}</option>)}</select> : r} {!(withActual && isNew(r)) && <button className="x" title="Remove row" onClick={() => remove('rows', r)}>✕</button>}</td>
+                {withActual && <td><select value={actuals[r] ?? ''} onChange={e => { setActuals({ ...actuals, [r]: e.target.value }); setTouched({ ...touched, [`${g?.code}|${place}|${r}`]: 1 }); }}><option value="">Select count</option>{options(actuals[r]).map(x => <option key={x}>{x}</option>)}</select></td>}
+                <td className={withActual ? "mk" : ""}>{withActual ? <select value={isNew(r) ? '' : r} onChange={e => changeMarketing(r, e.target.value)}>{isNew(r) && <option value="">Select count</option>}{options(r).filter(x => !isNew(x) && (x === r || !(isNew(r) ? visible(g) : rows).includes(x))).map(x => <option key={x}>{x}</option>)}</select> : r} {!(withActual && isNew(r)) && <button className="x" title="Remove row" onClick={() => remove('rows', r)}>✕</button>}</td>
                 {cols.map(b => {
                   const ps = withActual ? unitPlaces(g?.code) : [];
                   if (withActual && ps.length) {
-                    // a unit with places: one box per place, and the brand total after them
+                    // a unit with places: the box for the place picked above the table
                     const k = key(b, r);
-                    return <React.Fragment key={b}>
-                      {ps.map(p => <td key={p}><CalcInput placeholder="qty" disabled={isNew(r)} value={cellPlaces[k]?.[p]?.qty ?? ''} onChange={v => setPlaceQty(b, r, ps, p, v)} /></td>)}
-                      <td className="tot"><b>{num(cells[k])}</b></td>
-                    </React.Fragment>;
+                    return <td key={b}><CalcInput placeholder="qty" disabled={isNew(r)} value={cellPlaces[k]?.[place]?.qty ?? ''} onChange={v => setPlaceQty(b, r, ps, place, v)} /></td>;
                   }
                   return (
                     <td key={b}>{withActual ? (
@@ -764,7 +802,7 @@ function BrandGrid({ kind, title, date, withActual }) {
                     ) : <input type="number" min="0" value={cells[key(b, r)] ?? ''} onChange={e => setCells({ ...cells, [key(b, r)]: e.target.value })} style={{ width: 80 }} />}</td>
                   );
                 })}
-                <td className="tot"><b>{total(cols, [r])}</b></td></tr>
+                <td className="tot"><b>{withActual && unitPlaces(g?.code).length ? placeTotal(cols, [r], place) : total(cols, [r])}</b></td></tr>
   );
   // Chippam / Cone Bags: one table per unit; its last line is always a blank one, and choosing a marketing count there adds the next blank line
   const unitGroups = () => {
@@ -773,7 +811,7 @@ function BrandGrid({ kind, title, date, withActual }) {
     return loose.length ? [...g, { code: '', name: 'No unit', rows: loose }] : g;
   };
   const addRowTo = async unit => {
-    try { await api(`/api/brand-stock/${kind}/rows`, { method: 'POST', body: { label: `~new~${Date.now()}-${unit}`, unit } }); load(); }
+    try { await api(`/api/brand-stock/${kind}/rows`, { method: 'POST', body: { label: `~new~${Date.now()}-${unit}`, unit } }); load(true); }
     catch (x) { setMsg(x.message); }
   };
   const tried = useRef(new Set());
@@ -791,30 +829,76 @@ function BrandGrid({ kind, title, date, withActual }) {
   const unitTable = g => {
     const ps = unitPlaces(g.code);
     return (
-    <details key={g.code || 'none'} className="card unitcard" open>
-      <summary><b>{g.name}</b>{ps.length > 0 && <span className="mute"> by place</span>}</summary>
+    <>
+    <div className="card">
+      <h2>{g.name}{place ? ` · ${place}` : ''} entry</h2>
       <div className="grid-wrap">
-        <table className="grid">
+        <table className="grid" data-labelfirst="1">
           <thead>
-            <tr><th rowSpan={ps.length ? 2 : 1}>Actual Count</th><th rowSpan={ps.length ? 2 : 1} className="mk">Marketing</th>
-              {cols.map(b => <th key={b} colSpan={ps.length ? ps.length + 1 : 1} rowSpan={1} style={ps.length ? { textAlign: 'center' } : undefined}>{b} <button className="x" title="Remove column" onClick={() => remove('cols', b)}>✕</button></th>)}
-              <th className="tot" rowSpan={ps.length ? 2 : 1}>Total</th></tr>
-            {ps.length > 0 && <tr>{cols.map(b => <React.Fragment key={b}>{ps.map(p => <th key={p} style={{ top: 38 }}>{p}</th>)}<th className="tot" style={{ top: 38 }}>Total</th></React.Fragment>)}</tr>}
+            <tr><th>Actual Count</th><th className="mk">Marking</th>
+              {cols.map(b => <th key={b}>{b} <button className="x" title="Remove column" onClick={() => remove('cols', b)}>✕</button></th>)}
+              <th className="tot">Total</th></tr>
           </thead>
-          <tbody>{g.rows.map((r, i) => row(r, g, i))}</tbody>
+          <tbody>{visible(g).map((r, i) => row(r, g, i))}</tbody>
           <tfoot><tr><td>TOTAL</td><td className="mk" />
-            {cols.map(b => ps.length ? (
-              <React.Fragment key={b}>
-                {ps.map(p => <td key={p}><b>{g.rows.reduce((t, r) => t + num(cellPlaces[key(b, r)]?.[p]?.qty), 0)}</b></td>)}
-                <td className="tot"><b>{total([b], g.rows)}</b></td>
-              </React.Fragment>
-            ) : <td key={b}><b>{total([b], g.rows)}</b></td>)}
-            <td className="tot"><b>{total(cols, g.rows)}</b></td></tr></tfoot>
+            {cols.map(b => <td key={b}><b>{ps.length ? placeTotal([b], g.rows, place) : total([b], g.rows)}</b></td>)}
+            <td className="tot"><b>{ps.length ? placeTotal(cols, g.rows, place) : total(cols, g.rows)}</b></td></tr></tfoot>
         </table>
       </div>
-    </details>
+      <p style={{ margin: '12px 0 0', display: 'flex', gap: 12, alignItems: 'center' }}><button type="button" className="btn primary" onClick={save}>Save</button> <span className="mute">{msg}</span></p>
+    </div>
+    <div className="card">
+      <h2>{g.name} summary</h2>
+      <table className="rep" data-labelfirst="1">
+        <thead><tr><th>Actual</th><th>Marking</th>{ps.map(p => <th key={p}>{p}</th>)}<th className="tot">Total</th><th /></tr></thead>
+        <tbody>{g.rows.filter(r => !isNew(r)).map(r => (
+          <tr key={r}><td>{actuals[r] || ''}</td><td>{r}</td>{ps.map(p => <td key={p}>{placeTotal(cols, [r], p)}</td>)}<td className="tot"><b>{total(cols, [r])}</b></td>
+            <td><button type="button" className="x" title="Remove this line from the sheet" onClick={() => remove('rows', r)}>✕</button></td></tr>
+        ))}</tbody>
+        <tfoot><tr><td>TOTAL</td><td />{ps.map(p => <td key={p}><b>{placeTotal(cols, g.rows, p)}</b></td>)}<td className="tot"><b>{total(cols, g.rows)}</b></td><td /></tr></tfoot>
+      </table>
+    </div>
+    </>
     );
   };
+  if (withActual) {
+    const groups = unitGroups();
+    const g = groups.find(x => x.code === sel.unit) || groups[0];
+    if (!g) return <div className="card">Loading…</div>;
+    const ps = unitPlaces(g.code);
+    const entered = x => x.rows.filter(r => !isNew(r) && total(cols, [r])).length;
+    const cur = ps.length ? placeTotal(cols, g.rows, place) : total(cols, g.rows);
+    return (
+      <>
+      <div className="card entrybar">
+        <div className="bar">
+          <label>Unit
+            <select value={g.code} onChange={e => choose({ unit: e.target.value, place: undefined })}>
+              {groups.map(x => <option key={x.code} value={x.code}>{x.name}{entered(x) ? ` (${entered(x)} entered)` : ''}</option>)}
+            </select>
+          </label>
+          {ps.length > 0 && (
+            <label>Place
+              <select value={place} onChange={e => choose({ place: e.target.value })}>
+                {ps.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </label>
+          )}
+          <div className="menu-wrap">
+            <button type="button" className="btn" onClick={() => openMenu('cols')}>+ Column</button>
+            {picker('cols', 'brand')}
+          </div>
+        </div>
+        <div className="strip">
+          <b>{title} | {g.name}{place ? ` | ${place}` : ''} | {date}</b>
+          <span>{entered(g)} {entered(g) === 1 ? 'line' : 'lines'} entered</span>
+          <span>Quantity {cur}</span>
+        </div>
+      </div>
+      {unitTable(g)}
+      </>
+    );
+  }
   return (
     <div className="card">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -824,7 +908,7 @@ function BrandGrid({ kind, title, date, withActual }) {
           {picker('cols', 'brand')}
         </div>
       </div>
-      <p className="mute">Enter the quantity for each count and brand. Pick a marketing count on the blank line of a unit to add a row; add brands with + Column.</p>
+      <p className="mute">Enter the quantity for each count and brand. Pick a marking count on the blank line of a unit to add a row; add brands with + Column.</p>
       {withActual ? (
         <>
           <p><b>All units:</b> <b>{total(cols, rows)}</b></p>
@@ -859,21 +943,35 @@ function Winding({ date, masters, setMasters }) {
   const [f, setF] = useState({ party: masters.parties[0] || '', count: masters.counts[0], weight_kg: '', note: '' });
   const [newParty, setNewParty] = useState('');
   const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const [pending, setPending] = useState([]); // new entries, not saved yet
+  const [removed, setRemoved] = useState([]); // saved entries to delete on Save
   const load = useCallback(() => api(`/api/report?date=${date}`).then(r => setRows(r.winding.rows)), [date]);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { setPending([]); setRemoved([]); setErr(''); setMsg(''); }, [date]);
+  const dirty = pending.length > 0 || removed.length > 0;
+  const view = [...rows.filter(r => !removed.includes(r.id)), ...pending];
   const set = k => e => setF({ ...f, [k]: e.target.value });
-  const add = async e => {
-    e.preventDefault(); setErr('');
-    try { await api('/api/winding', { method: 'POST', body: { ...f, date } }); setF({ ...f, weight_kg: '', note: '' }); load(); }
-    catch (x) { setErr(x.message); }
+  const add = e => {
+    e.preventDefault(); setErr(''); setMsg('');
+    setPending([...pending, { id: 'new-' + Date.now() + '-' + pending.length, party: f.party, count: f.count, weight_kg: +f.weight_kg, note: f.note }]);
+    setF({ ...f, weight_kg: '', note: '' });
+  };
+  const save = async () => {
+    setErr('');
+    try {
+      for (const id of removed) await api(`/api/winding/${id}`, { method: 'DELETE' });
+      for (const p of pending) await api('/api/winding', { method: 'POST', body: { party: p.party, count: p.count, weight_kg: p.weight_kg, note: p.note, date } });
+      setPending([]); setRemoved([]); setMsg('Saved'); load();
+    } catch (x) { setErr(x.message); }
   };
   const addParty = async () => {
     if (!newParty.trim()) return;
     await api('/api/parties', { method: 'POST', body: { name: newParty } });
     setMasters(await api('/api/masters')); setF({ ...f, party: newParty.trim() }); setNewParty('');
   };
-  const del = async id => { await api(`/api/winding/${id}`, { method: 'DELETE' }); load(); };
-  const total = rows.reduce((s, r) => s + r.weight_kg, 0);
+  const del = id => { setMsg(''); if (String(id).startsWith('new-')) setPending(pending.filter(p => p.id !== id)); else setRemoved([...removed, id]); };
+  const total = view.reduce((s, r) => s + r.weight_kg, 0);
   return (
     <>
       <div className="card">
@@ -883,7 +981,7 @@ function Winding({ date, masters, setMasters }) {
           <label>Count<select value={f.count} onChange={set('count')}>{masters.counts.map(c => <option key={c}>{c}</option>)}</select></label>
           <label>Weight (kg)<input type="number" step="0.001" value={f.weight_kg} onChange={set('weight_kg')} required /></label>
           <label>Note<input value={f.note} onChange={set('note')} /></label>
-          <button className="btn primary">Add</button>
+          <button className="btn primary">Add to list</button>
         </form>
         {err && <div className="err">{err}</div>}
         <p className="form" style={{ marginTop: 14 }}>
@@ -895,17 +993,124 @@ function Winding({ date, masters, setMasters }) {
         <h2>Cone winding — {date}</h2>
         <table>
           <thead><tr><th>Party</th><th>Count</th><th>Weight (kg)</th><th>Note</th><th /></tr></thead>
-          <tbody>{rows.map(r => (
-            <tr key={r.id}><td>{r.party}</td><td>{r.count}</td><td>{fmt(r.weight_kg)}</td><td style={{ textAlign: 'left' }}>{r.note}</td>
+          <tbody>{view.map(r => (
+            <tr key={r.id}><td>{r.party}</td><td>{r.count}</td><td>{fmt(r.weight_kg)}</td><td style={{ textAlign: 'left' }}>{String(r.id).startsWith('new-') ? <span className="badge off">unsaved</span> : r.note}{String(r.id).startsWith('new-') && r.note ? ' ' + r.note : ''}</td>
               <td><button className="x" onClick={() => del(r.id)}>✕</button></td></tr>
           ))}</tbody>
           <tfoot><tr><td>TOTAL</td><td /><td>{fmt(total)}</td><td /><td /></tr></tfoot>
         </table>
+        <p style={{ display: 'flex', gap: 12, alignItems: 'center', margin: '12px 0 0' }}><button type="button" className="btn primary" onClick={save}>Save</button>
+          <span className="mute">{dirty ? 'Unsaved changes. Click Save to keep them.' : msg}</span></p>
       </div>
     </>
   );
 }
 
+// Doubling: yarn is given to a company (e.g. 56s) and they bring back the doubled yarn (e.g. 2/56s).
+// Saved rows are one "given" row and one "received" row per count; this joins them back into lines.
+const PLIES = [2, 3, 4];
+function doublingLines(rows) {
+  const out = {};
+  rows.forEach(r => {
+    const rec = r.note === 'received';
+    const base = rec && r.count.includes('/') ? r.count.split('/').slice(1).join('/') : r.count;
+    const k = r.party + '|' + base;
+    const g = (out[k] ||= { party: r.party, count: base, bags: 0, ply: 2, inBags: 0, ids: [] });
+    g.ids.push(r.id);
+    if (rec) { g.inBags += r.bags || 0; g.ply = +r.count.split('/')[0] || 2; } else g.bags += r.bags || 0;
+  });
+  return Object.values(out);
+}
+
+function Doubling({ date, masters }) {
+  const [party, setParty] = useState(() => { try { return sessionStorage.getItem('doublingParty') || ''; } catch { return ''; } });
+  const [rows, setRows] = useState([]); // everything entered on this date
+  const [lines, setLines] = useState([]); // this company's lines: [{count, bags, ply, inBags}]
+  const [msg, setMsg] = useState('');
+  const company = masters.parties.includes(party) ? party : (masters.parties[0] || '');
+  const load = useCallback(() => api(`/api/report?date=${date}`).then(r => setRows(r.doubling?.rows || [])), [date]);
+  useEffect(() => { load(); }, [load]);
+  // lines come from what is saved for this company on this date
+  useEffect(() => {
+    setLines(doublingLines(rows.filter(r => r.party === company)).map(g => ({ count: g.count, bags: String(g.bags || ''), ply: g.ply, inBags: String(g.inBags || '') })));
+    setMsg('');
+  }, [rows, company]);
+  const pick = p => { setParty(p); try { sessionStorage.setItem('doublingParty', p); } catch { /* ignore */ } };
+  const counts = masters.counts;
+  const used = lines.map(l => l.count);
+  const setLine = (i, patch) => setLines(lines.map((l, k) => (k === i ? { ...l, ...patch } : l)));
+  const save = async () => {
+    try {
+      await api('/api/winding/day', { method: 'PUT', body: { date, kind: 'doubling', party: company, lines: lines.map(l => ({ count: l.count, bags: num(l.bags), ply: l.ply, inBags: num(l.inBags) })) } });
+      await load(); setMsg('Saved');
+    } catch (x) { setMsg(x.message); }
+  };
+  const given = lines.reduce((s, l) => s + num(l.bags), 0);
+  const got = lines.reduce((s, l) => s + num(l.inBags), 0);
+  const day = doublingLines(rows);
+  // a count that is no longer in Master (older entry) stays selectable so it still shows
+  const opts = cur => [...counts, ...(cur && !counts.includes(cur) ? [cur] : [])].map(c => <option key={c} value={c} disabled={c !== cur && used.includes(c)}>{c}</option>);
+  const removeDay = async g => { for (const id of g.ids) await api(`/api/winding/${id}`, { method: 'DELETE' }); load(); };
+  return (
+    <>
+      <div className="card entrybar">
+        <div className="bar">
+          <label>Company
+            <select value={company} onChange={e => pick(e.target.value)}>
+              {masters.parties.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="strip"><b>{company || 'No company'} | {date}</b><span>{lines.filter(l => num(l.bags) || num(l.inBags)).length} lines entered</span><span>Given {given} bags</span><span>Received {got} bags</span></div>
+      </div>
+
+      <div className="card">
+        <h2>{company} <span className="rep-sub">given count → doubled count received</span></h2>
+        <table className="rep entry">
+          <thead><tr><th>Count given</th><th>Bags given</th><th>Ply</th><th>Count received</th><th>Bags received</th></tr></thead>
+          <tbody>
+            {lines.map((l, i) => (
+              <tr key={i}>
+                <td>
+                  <select value={l.count} onChange={e => setLine(i, { count: e.target.value })}>{opts(l.count)}</select>
+                  <> <button type="button" className="x" title="Remove this line" onClick={() => setLines(lines.filter((_, k) => k !== i))}>✕</button></>
+                </td>
+                <td><CalcInput placeholder="bags" width={90} value={l.bags} onChange={v => setLine(i, { bags: v })} /></td>
+                <td><select value={l.ply} onChange={e => setLine(i, { ply: +e.target.value })}>{PLIES.map(n => <option key={n} value={n}>{n} ply</option>)}</select></td>
+                <td><b>{l.ply}/{l.count}</b></td>
+                <td><CalcInput placeholder="bags" width={90} value={l.inBags} onChange={v => setLine(i, { inBags: v })} /></td>
+              </tr>
+            ))}
+            <tr>
+              <td>
+                <select value="" onChange={e => e.target.value && setLines([...lines, { count: e.target.value, bags: '', ply: 2, inBags: '' }])}>
+                  <option value="">Select count…</option>{opts('')}
+                </select>
+              </td>
+              <td><input type="text" disabled placeholder="bags" style={{ width: 90 }} /></td>
+              <td /><td />
+              <td><input type="text" disabled placeholder="bags" style={{ width: 90 }} /></td>
+            </tr>
+          </tbody>
+          <tfoot><tr><td>TOTAL</td><td><b>{given}</b></td><td /><td /><td><b>{got}</b></td></tr></tfoot>
+        </table>
+        <p style={{ margin: '12px 0 0', display: 'flex', gap: 12, alignItems: 'center' }}><button type="button" className="btn primary" onClick={save}>Save</button> <span className="mute">{msg}</span></p>
+      </div>
+
+      <div className="card">
+        <h2>Doubling — {date}</h2>
+        <table className="rep">
+          <thead><tr><th>Company</th><th>Count given</th><th>Bags given</th><th>Count received</th><th>Bags received</th><th /></tr></thead>
+          <tbody>
+            {day.map(g => <tr key={g.party + g.count}><td>{g.party}</td><td>{g.count}</td><td>{g.bags || '–'}</td><td>{g.inBags ? `${g.ply}/${g.count}` : '–'}</td><td>{g.inBags || '–'}</td><td><button type="button" className="x" title="Remove this entry" onClick={() => removeDay(g)}>✕</button></td></tr>)}
+            {!day.length && <tr><td colSpan={6} className="mute" style={{ textAlign: 'left' }}>No entries for this date.</td></tr>}
+          </tbody>
+          <tfoot><tr><td>TOTAL</td><td /><td>{day.reduce((s, g) => s + g.bags, 0)}</td><td /><td>{day.reduce((s, g) => s + g.inBags, 0)}</td><td /></tr></tfoot>
+        </table>
+      </div>
+    </>
+  );
+}
 // bags + loose cones (40 per bag) as the sheet writes it, e.g. 10 bags + 60 cones = 11 (Loose cone bag = 1)
 const coneEq = (bags, cones) => {
   const extra = Math.floor(cones / 40);
@@ -974,7 +1179,7 @@ function Report({ date }) {
         <div key={u.code} className="rep-block">
           <h3>{u.name}</h3>
           <table className="rep">
-            <thead><tr><th>Actual count</th><th>Marketing</th>{sheet.cols.map(b => <th key={b}>{b}</th>)}<th className="tot">Total</th></tr></thead>
+            <thead><tr><th>Actual count</th><th>Marking</th>{sheet.cols.map(b => <th key={b}>{b}</th>)}<th className="tot">Total</th></tr></thead>
             <tbody>{rows.map(r => <tr key={r}><td>{sheet.actuals[r] || '–'}</td><td>{r}</td>{sheet.cols.map(b => <td key={b}>{dash(qty(b, r))}</td>)}<td className="tot"><b>{rowTotal(r)}</b></td></tr>)}</tbody>
             <tfoot><tr><td>TOTAL</td><td />{sheet.cols.map(b => <td key={b}>{rows.reduce((s, r) => s + qty(b, r), 0)}</td>)}<td className="tot">{rows.reduce((s, r) => s + rowTotal(r), 0)}</td></tr></tfoot>
           </table>
@@ -991,8 +1196,11 @@ function Report({ date }) {
   };
 
   const windTotal = d.winding.total;
-  const SHEETS = [['all', 'Combined report'], ['bale', 'Bale Stock'], ['single', 'Single Cone'], ['chippam', 'Chippam'], ['conebags', 'Cone Bags'], ['winding', 'Cone Winding']];
-  const show = k => which === 'all' || which === k;
+  const dbl = d.doubling || { rows: [], totalBags: 0 };
+  const dbLines = doublingLines(dbl.rows);
+  const SHEETS = [['all', 'Combined report'], ['bale', 'Bale Stock'], ['single', 'Single Cone'], ['chippam', 'Chippam'], ['conebags', 'Cone Bags'], ['winding', 'Cone Winding'], ['doubling', 'Doubling']];
+  // the combined report leaves out Cone Winding and Doubling; they have their own reports
+  const show = k => which === k || (which === 'all' && k !== 'winding' && k !== 'doubling');
   const label = SHEETS.find(x => x[0] === which)[1];
   return (
     <>
@@ -1007,7 +1215,7 @@ function Report({ date }) {
         <div className="rep-title">Shivaji Inventory — {which === 'all' ? 'Daily Stock Report' : label}</div>
         <div className="rep-date">{pretty}</div>
       </div>
-      {show('bale') && <section className="card rep-sec"><h2>Bale stock <span className="rep-sub">(bales)</span></h2><BaleStockTable rows={d.bales} /></section>}
+      {show('bale') && <section className="card rep-sec"><h2>Bale stock <span className="rep-sub">(bales)</span></h2><BaleStockTable rows={d.bales.rows || []} qualities={d.bales.qualities || []} /></section>}
       {show('single') && <section className="card rep-sec">
         <h2>Single cone stock{scUnits.length > 0 && <span className="rep-sum">All units {scAll.bags + Math.floor(scAll.cones / 40)} bags{scAll.cones % 40 ? ` + ${scAll.cones % 40} loose cones` : ''}</span>}</h2>
         {scUnits.length ? scUnits : <p className="mute">No entries for this date.</p>}
@@ -1020,6 +1228,15 @@ function Report({ date }) {
             <thead><tr><th>Party</th><th>Count</th><th>Weight (kg)</th><th>Note</th></tr></thead>
             <tbody>{d.winding.rows.map(x => <tr key={x.id}><td>{x.party}</td><td>{x.count}</td><td>{fmt(x.weight_kg)}</td><td style={{ textAlign: 'left' }}>{x.note}</td></tr>)}</tbody>
             <tfoot><tr><td>TOTAL</td><td /><td>{fmt(windTotal)}</td><td /></tr></tfoot>
+          </table>
+        ) : <p className="mute">No entries for this date.</p>}
+      </section>}
+      {show('doubling') && <section className="card rep-sec"><h2>Doubling{dbLines.length > 0 && <span className="rep-sum">Given {dbLines.reduce((t, g) => t + g.bags, 0)} bags · Received {dbLines.reduce((t, g) => t + g.inBags, 0)} bags</span>}</h2>
+        {dbLines.length ? (
+          <table className="rep">
+            <thead><tr><th>Company</th><th>Count given</th><th>Bags given</th><th>Count received</th><th>Bags received</th></tr></thead>
+            <tbody>{dbLines.map(g => <tr key={g.party + g.count}><td>{g.party}</td><td>{g.count}</td><td>{g.bags || '–'}</td><td>{g.inBags ? g.ply + '/' + g.count : '–'}</td><td>{g.inBags || '–'}</td></tr>)}</tbody>
+            <tfoot><tr><td>TOTAL</td><td /><td>{dbLines.reduce((t, g) => t + g.bags, 0)}</td><td /><td>{dbLines.reduce((t, g) => t + g.inBags, 0)}</td></tr></tfoot>
           </table>
         ) : <p className="mute">No entries for this date.</p>}
       </section>}

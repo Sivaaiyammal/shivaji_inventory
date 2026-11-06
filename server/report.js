@@ -7,11 +7,13 @@ export function baleStock(date) {
       SUM(CASE WHEN type='IN' THEN weight_kg ELSE -weight_kg END) weight_kg
     FROM bale_moves WHERE date <= ? GROUP BY unit, quality`).all(date);
   const units = db.prepare('SELECT code FROM units WHERE active=1 ORDER BY sort').all().map(u => u.code);
+  const qs = db.prepare('SELECT id FROM qualities ORDER BY sort, id').all().map(x => x.id);
   const opening = db.prepare('SELECT unit, quality, SUM(bales) bales FROM opening_balances WHERE date <= ? GROUP BY unit, quality').all(date);
   const open = (u, q) => opening.find(o => o.unit === u && o.quality === q)?.bales || 0;
   return units.map(u => {
-    const g = q => { const m = rows.find(r => r.unit === u && r.quality === q) || { bales: 0, weight_kg: 0 }; return { ...m, bales: m.bales + open(u, q) }; };
-    return { unit: u, q1: g(1), q2: g(2), bales: g(1).bales + g(2).bales, weight_kg: g(1).weight_kg + g(2).weight_kg };
+    const g = q => { const m = rows.find(x => x.unit === u && x.quality === q) || { bales: 0, weight_kg: 0 }; return { ...m, bales: m.bales + open(u, q) }; };
+    const q = Object.fromEntries(qs.map(id => [id, g(id)]));
+    return { unit: u, q, bales: qs.reduce((t, id) => t + q[id].bales, 0), weight_kg: qs.reduce((t, id) => t + q[id].weight_kg, 0) };
   });
 }
 
@@ -42,13 +44,13 @@ export function singleCone(date) {
   return { units, rows, unitTotals, grand: rows.reduce((s, r) => s + r.total, 0), conesPerBag: CONES_PER_BAG };
 }
 
-export function winding(date) {
-  const rows = db.prepare('SELECT * FROM winding WHERE date=? ORDER BY party, count').all(date);
+export function winding(date, kind = 'winding') {
+  const rows = db.prepare('SELECT * FROM winding WHERE date=? AND kind=? ORDER BY party, count').all(date, kind);
   const byParty = {};
   for (const r of rows) byParty[r.party] = (byParty[r.party] || 0) + r.weight_kg;
-  return { rows, byParty, total: rows.reduce((s, r) => s + r.weight_kg, 0) };
+  return { rows, byParty, total: rows.reduce((s, r) => s + r.weight_kg, 0), totalBags: rows.reduce((s, r) => s + (r.bags || 0), 0) };
 }
 
 export const daily = date => ({
-  date, bales: baleStock(date), mixing: mixing(date), singleCone: singleCone(date), winding: winding(date),
+  date, bales: baleStock(date), mixing: mixing(date), singleCone: singleCone(date), winding: winding(date), doubling: winding(date, 'doubling'),
 });

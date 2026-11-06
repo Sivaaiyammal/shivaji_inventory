@@ -30,7 +30,7 @@ function labelTable(t) {
   [...t.tBodies, t.tFoot].filter(Boolean).forEach(sec => [...sec.rows].forEach(tr => {
     let col = 0;
     [...tr.cells].forEach((td, i) => {
-      const l = i === 0 ? '' : labels[col] || '';
+      const l = i === 0 && !(t.dataset.labelfirst && sec !== t.tFoot) ? '' : labels[col] || '';
       if (td.dataset.label !== l) td.dataset.label = l;
       col += td.colSpan;
     });
