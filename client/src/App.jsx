@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 const api = async (url, opts) => {
-  const r = await fetch(url, opts && { ...opts, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts.body) });
+  const r = await fetch(import.meta.env.BASE_URL + url.replace(/^\//, ''), opts && { ...opts, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts.body) });
   const j = await r.json();
   // session expired or never logged in: send the user back to the login page
   if (r.status === 401 && !url.startsWith('/api/login') && !url.startsWith('/api/me')) window.dispatchEvent(new Event('auth-lost'));
